@@ -68,6 +68,11 @@ public struct OnlineConnection: Sendable {
         return try session.retransmit(at: milliseconds)
     }
 
+    mutating func keepalive(at milliseconds: UInt64) -> [UInt8]? {
+        guard isOpen else { return nil }
+        return session.sendControl([0x00] + bigEndianBytes(milliseconds))
+    }
+
     public mutating func receive(
         _ datagram: [UInt8], from sender: IPv4Endpoint, at milliseconds: UInt64
     ) throws -> Input {

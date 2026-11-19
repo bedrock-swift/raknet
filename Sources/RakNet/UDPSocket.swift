@@ -26,7 +26,7 @@ package final class UDPSocket: Sendable {
     private let handle: SocketHandle
     package let localAddress: IPv4Endpoint
 
-    package init(bindTo endpoint: IPv4Endpoint) throws {
+    package init(bindTo endpoint: IPv4Endpoint, receiveTimeout: UInt32 = 100) throws {
         #if os(Windows)
         var data = WSADATA()
         let startup = WSAStartup(0x0202, &data)
@@ -61,12 +61,12 @@ package final class UDPSocket: Sendable {
         }
         let timeoutResult: Int32 // session timer wakeup
         #if os(Windows)
-        var timeout: UInt32 = 100
+        var timeout = receiveTimeout
         timeoutResult = withUnsafeBytes(of: &timeout) {
             setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, $0.baseAddress?.assumingMemoryBound(to: CChar.self), Int32($0.count))
         }
         #else
-        var timeout = timeval(tv_sec: 0, tv_usec: 100_000)
+        var timeout = timeval(tv_sec: Int(receiveTimeout / 1000), tv_usec: Int(receiveTimeout % 1000) * 1000)
         timeoutResult = withUnsafeBytes(of: &timeout) {
             setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, $0.baseAddress, socklen_t($0.count))
         }
