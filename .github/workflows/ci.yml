@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    container: swift:6.4.2-noble
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: swift test
+      - name: Swift UDP echo
+        run: |
+          demo="$(swift build --show-bin-path)/raknet-demo"
+          "$demo" 19132 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          "$demo" --connect 19132
