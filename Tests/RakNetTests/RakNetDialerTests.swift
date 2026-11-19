@@ -7,7 +7,7 @@ import Testing
     defer { listener.close() }
 
     let client = try await RakNetConnection.dial(listener.localAddress)
-    let incoming = try await listener.accept()
+    let incoming = try await expectWithin("accept") { try await listener.accept() }
     let server = try #require(incoming)
     #expect(client.remoteAddress == listener.localAddress)
     #expect(server.remoteAddress == client.localAddress)
@@ -15,14 +15,14 @@ import Testing
 
     let payload = [UInt8](repeating: 0xfe, count: 4096)
     try await client.send(payload)
-    let request = try await server.receive()
+    let request = try await expectWithin("request") { try await server.receive() }
     #expect(request == payload)
-    try await server.send([0xfe, 0x42], reliability: .unreliableSequenced, channel: 3)
-    let reply = try await client.receive()
+    try await server.send([0xfe, 0x42], reliability: .reliableSequenced, channel: 3)
+    let reply = try await expectWithin("reply") { try await client.receive() }
     #expect(reply == [0xfe, 0x42])
 
     try await client.close()
-    let afterClose = try await server.receive()
+    let afterClose = try await expectWithin("close") { try await server.receive() }
     #expect(afterClose == nil)
 }
 
@@ -42,4 +42,23 @@ import Testing
     }
     let smaller = try attempt.scheduledPacket(at: 900)
     #expect(smaller?.count == 1172)
+}
+
+private struct DialTestTimeout: Error {
+    let operation: String
+}
+
+private func expectWithin<T: Sendable>(
+    _ operation: String, _ body: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask(operation: body)
+        group.addTask {
+            try await Task.sleep(for: .seconds(5))
+            throw DialTestTimeout(operation: operation)
+        }
+        defer { group.cancelAll() }
+        guard let result = try await group.next() else { throw DialTestTimeout(operation: operation) }
+        return result
+    }
 }

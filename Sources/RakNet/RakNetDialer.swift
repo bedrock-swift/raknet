@@ -11,8 +11,7 @@ public extension RakNetConnection {
         guard OfflineWire.mtuRange.contains(mtu) else { throw OfflineClient.HandshakeError.invalidMTU }
         guard timeout > .zero else { throw RakNetTransportError.timedOut }
 
-        let bindAddress = IPv4Endpoint(address: address.address & 0xff000000 == 0x7f000000 ? 0x7f000001 : 0, port: 0)
-        let socket = try UDPSocket(bindTo: bindAddress, receiveTimeout: 20)
+        let socket = try UDPSocket(clientFor: address)
         let accepted = TransportInbox<RakNetConnection>(limit: 1, byteLimit: 1)
         let commands = TransportCommands()
         TransportDriver.launch(

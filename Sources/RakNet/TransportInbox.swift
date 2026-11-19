@@ -20,6 +20,8 @@ final class TransportInbox<Element: Sendable>: @unchecked Sendable {
         self.byteLimit = byteLimit
     }
 
+    var isFinished: Bool { lock.withLock { finished } }
+
     func offer(_ value: Element, size: Int = 1) -> Bool {
         lock.withLock {
             guard !finished else { return false }

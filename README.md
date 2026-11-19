@@ -49,6 +49,8 @@ if let reply = try await connection.receive() {
 try await connection.close()
 ```
 
+Use `try await RakNetConnection.ping(address)` to read the server advertisement and round-trip time.
+
 Send defaults to reliable ordered delivery. Pass `reliability` and `channel` to select a different mode.
 
 The default IPv4 MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OnlineConnection` exposes the protocol state machine for applications that provide their own UDP I/O.

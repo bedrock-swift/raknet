@@ -89,6 +89,11 @@ package final class UDPSocket: Sendable {
         localAddress = Self.endpoint(for: address)
     }
 
+    convenience init(clientFor endpoint: IPv4Endpoint) throws {
+        let address: UInt32 = endpoint.address & 0xff000000 == 0x7f000000 ? 0x7f000001 : 0
+        try self.init(bindTo: IPv4Endpoint(address: address, port: 0), receiveTimeout: 20)
+    }
+
     deinit {
         Self.close(handle)
     }
