@@ -17,7 +17,7 @@ import Testing
     try await client.send(payload)
     let request = try await server.receive()
     #expect(request == payload)
-    try await server.send([0xfe, 0x42])
+    try await server.send([0xfe, 0x42], reliability: .unreliableSequenced, channel: 3)
     let reply = try await client.receive()
     #expect(reply == [0xfe, 0x42])
 

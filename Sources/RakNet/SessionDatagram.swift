@@ -1,20 +1,24 @@
-struct Frame: Equatable, Sendable {
-    enum Reliability: UInt8, Sendable {
-        case unreliable = 0
-        case unreliableSequenced = 1
-        case reliable = 2
-        case ordered = 3
-        case reliableSequenced = 4
+public enum RakNetReliability: UInt8, Sendable {
+    case unreliable = 0
+    case unreliableSequenced = 1
+    case reliable = 2
+    case reliableOrdered = 3
+    case reliableSequenced = 4
 
-        var hasMessageIndex: Bool {
-            self == .reliable || self == .ordered || self == .reliableSequenced
-        }
-
-        var hasSequenceIndex: Bool {
-            self == .unreliableSequenced || self == .reliableSequenced
-        }
+    var hasMessageIndex: Bool {
+        self == .reliable || self == .reliableOrdered || self == .reliableSequenced
     }
 
+    var hasSequenceIndex: Bool {
+        self == .unreliableSequenced || self == .reliableSequenced
+    }
+
+    var hasOrder: Bool {
+        self == .reliableOrdered || hasSequenceIndex
+    }
+}
+
+struct Frame: Equatable, Sendable {
     struct Order: Equatable, Hashable, Sendable {
         let index: UInt32
         let channel: UInt8
@@ -26,7 +30,7 @@ struct Frame: Equatable, Sendable {
         let index: UInt32
     }
 
-    let reliability: Reliability
+    let reliability: RakNetReliability
     let messageIndex: UInt32?
     let sequenceIndex: UInt32?
     let order: Order?
@@ -34,7 +38,7 @@ struct Frame: Equatable, Sendable {
     let payload: [UInt8]
 
     init(
-        reliability: Reliability, messageIndex: UInt32?, sequenceIndex: UInt32? = nil,
+        reliability: RakNetReliability, messageIndex: UInt32?, sequenceIndex: UInt32? = nil,
         order: Order?, fragment: Fragment?, payload: [UInt8]
     ) {
         self.reliability = reliability
@@ -47,7 +51,7 @@ struct Frame: Equatable, Sendable {
 
     init?(reading bytes: inout DatagramReader) {
         guard let header = bytes.byte(),
-              let reliability = Reliability(rawValue: header >> 5),
+              let reliability = RakNetReliability(rawValue: header >> 5),
               let bits = bytes.integer(UInt16.self), bits != 0 else { return nil }
 
         let messageIndex: UInt32?
@@ -67,7 +71,7 @@ struct Frame: Equatable, Sendable {
         }
 
         let order: Order?
-        if reliability == .ordered || reliability.hasSequenceIndex {
+        if reliability.hasOrder {
             guard let index = bytes.sequence(), let channel = bytes.byte(), channel < 32 else { return nil }
             order = Order(index: index, channel: channel)
         } else {

@@ -40,7 +40,7 @@ import Testing
     }
 
     let ordered = Frame(
-        reliability: .ordered, messageIndex: 0, order: Frame.Order(index: 0, channel: 0),
+        reliability: .reliableOrdered, messageIndex: 0, order: Frame.Order(index: 0, channel: 0),
         fragment: nil, payload: [0xfe, 0]
     )
     let opened = try session.receive(SessionDatagram.encode(sequence: 3, frame: ordered), at: 1)

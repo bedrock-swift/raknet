@@ -12,7 +12,8 @@ A RakNet transport library for Minecraft: Bedrock Edition, written in Swift.
 ## Features
 
 - IPv4 discovery and RakNet 11 handshakes
-- Reliable ordered delivery with ACK/NACK, retransmission, and fragment reassembly
+- Reliable, unreliable, ordered, and sequenced delivery
+- ACK/NACK, retransmission, and fragment reassembly
 - MTU negotiation and server cookie validation
 - Async clients and listeners backed by system UDP sockets
 
@@ -47,6 +48,8 @@ if let reply = try await connection.receive() {
 }
 try await connection.close()
 ```
+
+Send defaults to reliable ordered delivery. Pass `reliability` and `channel` to select a different mode.
 
 The default IPv4 MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OnlineConnection` exposes the protocol state machine for applications that provide their own UDP I/O.
 

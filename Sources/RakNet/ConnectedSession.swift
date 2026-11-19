@@ -2,6 +2,7 @@ public struct ConnectedSession: Sendable {
     public enum SessionError: Error, Equatable {
         case invalidMTU
         case invalidPayloadSize
+        case invalidOrderingChannel
         case sendWindowFull
         case receiveWindowFull
         case retryLimit
@@ -20,7 +21,7 @@ public struct ConnectedSession: Sendable {
 
     private struct FragmentKey: Hashable, Sendable {
         let id: UInt16
-        let order: Frame.Order
+        let order: Frame.Order?
         let sequence: UInt32?
     }
 
@@ -44,7 +45,8 @@ public struct ConnectedSession: Sendable {
     private let peerDatagramLimit: Int
     private var nextDatagram: UInt32 = 0
     private var nextMessage: UInt32 = 0
-    private var nextOrder: UInt32 = 0
+    private var nextOrder = [UInt32](repeating: 0, count: 32)
+    private var nextSequence = [UInt32](repeating: 0, count: 32)
     private var nextFragment: UInt16 = 0
     private var sent: [UInt32: Pending] = [:]
     private var incoming = SequenceWindow(size: windowSize)
@@ -63,37 +65,63 @@ public struct ConnectedSession: Sendable {
     }
 
     public mutating func send(_ payload: [UInt8], at milliseconds: UInt64) throws -> [[UInt8]] {
-        let frameLimit = datagramLimit - 14
-        let chunkSize = payload.count <= frameLimit ? frameLimit : frameLimit - 10 // split header
-        guard !payload.isEmpty, payload.count <= Self.fragmentLimit * chunkSize else {
-            throw SessionError.invalidPayloadSize
-        }
-        let count = (payload.count + chunkSize - 1) / chunkSize
-        guard sent.count + count <= Self.windowSize,
-              sent.values.allSatisfy({ packet in
-                  guard let index = packet.frame.messageIndex else { return true }
-                  let age = (nextMessage &- index) & Self.sequenceMask
-                  return Int(age) + count <= Self.windowSize
-              }) else { throw SessionError.sendWindowFull }
+        try send(payload, reliability: .reliableOrdered, at: milliseconds)
+    }
 
-        let order = Frame.Order(index: nextOrder, channel: 0) // shared fragment order
-        nextOrder = (nextOrder + 1) & Self.sequenceMask
+    public mutating func send(
+        _ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0, at milliseconds: UInt64
+    ) throws -> [[UInt8]] {
+        guard channel < 32, reliability.hasOrder || channel == 0 else { throw SessionError.invalidOrderingChannel }
+        var frameLimit = datagramLimit - 7 // datagram and frame headers
+        if reliability.hasMessageIndex { frameLimit -= 3 }
+        if reliability.hasSequenceIndex { frameLimit -= 3 }
+        if reliability.hasOrder { frameLimit -= 4 }
+        let fragmented = payload.count > frameLimit
+        let chunkSize = fragmented ? frameLimit - 10 : frameLimit // split header
+        let limit = reliability.hasMessageIndex ? Self.fragmentLimit * chunkSize : frameLimit
+        guard !payload.isEmpty, payload.count <= limit else { throw SessionError.invalidPayloadSize }
+        let count = (payload.count + chunkSize - 1) / chunkSize
+        if reliability.hasMessageIndex, !canSend(count) { throw SessionError.sendWindowFull }
+
+        let lane = Int(channel)
+        let order = reliability.hasOrder ? Frame.Order(index: nextOrder[lane], channel: channel) : nil
+        let sequence = reliability.hasSequenceIndex ? nextSequence[lane] : nil
+        if reliability == .reliableOrdered {
+            nextOrder[lane] = (nextOrder[lane] + 1) & Self.sequenceMask
+            nextSequence[lane] = 0
+        } else if let sequence {
+            nextSequence[lane] = (sequence + 1) & Self.sequenceMask
+        }
+
         let fragmentID = nextFragment
-        if count > 1 { nextFragment &+= 1 }
+        if fragmented { nextFragment &+= 1 }
         var datagrams: [[UInt8]] = []
         datagrams.reserveCapacity(count)
         for index in 0..<count {
             let start = index * chunkSize
             let end = min(start + chunkSize, payload.count)
-            let fragment = count == 1 ? nil : Frame.Fragment(count: UInt32(count), id: fragmentID, index: UInt32(index))
+            let fragment = fragmented ? Frame.Fragment(count: UInt32(count), id: fragmentID, index: UInt32(index)) : nil
+            let message = reliability.hasMessageIndex ? nextMessage : nil
             let frame = Frame(
-                reliability: .ordered, messageIndex: nextMessage, order: order,
+                reliability: reliability, messageIndex: message, sequenceIndex: sequence, order: order,
                 fragment: fragment, payload: Array(payload[start..<end])
             )
-            nextMessage = (nextMessage + 1) & Self.sequenceMask
-            datagrams.append(emit(frame, at: milliseconds, retries: 0))
+            if let message {
+                nextMessage = (message + 1) & Self.sequenceMask
+                datagrams.append(emit(frame, at: milliseconds, retries: 0))
+            } else {
+                datagrams.append(SessionDatagram.encode(sequence: takeSequence(), frame: frame))
+            }
         }
         return datagrams
+    }
+
+    private func canSend(_ count: Int) -> Bool {
+        sent.count + count <= Self.windowSize && sent.values.allSatisfy { packet in
+            guard let index = packet.frame.messageIndex else { return true }
+            let age = (nextMessage &- index) & Self.sequenceMask
+            return Int(age) + count <= Self.windowSize
+        }
     }
 
     public mutating func receive(_ datagram: [UInt8], at milliseconds: UInt64) throws -> Input {
@@ -162,7 +190,13 @@ public struct ConnectedSession: Sendable {
         }
 
         guard let order = frame.order else {
-            if frame.fragment == nil { payloads.append(frame.payload) }
+            if let fragment = frame.fragment {
+                guard frame.reliability.hasMessageIndex,
+                      let payload = try assemble(fragment, order: nil, sequence: nil, payload: frame.payload) else { return }
+                payloads.append(payload)
+            } else {
+                payloads.append(frame.payload)
+            }
             return
         }
         let channel = Int(order.channel)
@@ -253,7 +287,7 @@ public struct ConnectedSession: Sendable {
     }
 
     private mutating func assemble(
-        _ fragment: Frame.Fragment, order: Frame.Order, sequence: UInt32?, payload: [UInt8]
+        _ fragment: Frame.Fragment, order: Frame.Order?, sequence: UInt32?, payload: [UInt8]
     ) throws -> [UInt8]? {
         guard fragment.count <= Self.fragmentLimit else { throw SessionError.receiveWindowFull }
         let key = FragmentKey(id: fragment.id, order: order, sequence: sequence)
