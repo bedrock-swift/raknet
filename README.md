@@ -2,35 +2,53 @@
 
 # RakNet
 
-RakNet transport library for Minecraft Bedrock Edition, written in Swift.
+A RakNet transport library for Minecraft: Bedrock Edition, written in Swift.
 
 [![Swift 6](https://img.shields.io/badge/Swift-6-orange?style=flat-square&logo=swift)](https://www.swift.org)
+[![RakNet transport](https://img.shields.io/badge/transport-RakNet-black?style=flat-square)](#features)
 
 </div>
 
 ## Features
 
-The prototype supports IPv4 discovery, RakNet 11 handshakes, and bidirectional data transfer. Sessions use reliable ordered delivery, ACK/NACK, retransmission, and fragment reassembly.
-
-The client supports MTU negotiation and server cookies. Session timers take monotonic timestamps in milliseconds.
+- IPv4 discovery and RakNet 11 handshakes
+- Reliable ordered delivery with ACK/NACK, retransmission, and fragment reassembly
+- MTU negotiation and client support for server cookies
+- Async clients and listeners backed by system UDP sockets
 
 ## Usage
 
-`RakNet` processes datagram bytes and leaves UDP I/O to the caller. Pass the sender address observed by the socket and send any returned reply to that address.
+### Listen
 
 ```swift
 import RakNet
 
-let server = try OfflineServer(guid: 42, advertisement: Array("Example".utf8))
-let sender = IPv4Endpoint(address: 0x7f000001, port: 49152)
-func response(to datagram: [UInt8]) -> [UInt8]? {
-    server.reply(to: datagram, from: sender)
+let address = IPv4Endpoint(address: 0x7f000001, port: 19132)
+let listener = try RakNetListener.listen(on: address)
+defer { listener.close() }
+
+if let connection = try await listener.accept() {
+    while let packet = try await connection.receive() {
+        try await connection.send(packet)
+    }
 }
 ```
 
-`IPv4Endpoint.address` uses the numeric IPv4 address in host byte order. The advertisement contains application-defined bytes.
+### Dial
 
-The default IPv4 MTU is 1440 bytes, leaving 1412 bytes for UDP data. Set the server cap with `maximumMTU` and the client probe size with `probe(mtu:)`.
+```swift
+import RakNet
+
+let address = IPv4Endpoint(address: 0x7f000001, port: 19132)
+let connection = try await RakNetConnection.dial(address)
+try await connection.send([0xfe, 0x01])
+if let reply = try await connection.receive() {
+    print(reply)
+}
+try await connection.close()
+```
+
+The default IPv4 MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OnlineConnection` exposes the protocol state machine for applications that provide their own UDP I/O.
 
 ## Development
 
@@ -41,10 +59,8 @@ swift test
 swift run raknet-demo 19132
 ```
 
-The demo listens on UDP `127.0.0.1:19132` and echoes application packets. To send a 4096-byte message, run the client in another terminal.
+Run the client in a second terminal to send a 4096-byte message to the loopback echo server.
 
 ```sh
 swift run raknet-demo --connect 19132
 ```
-
-The protocol module has no package dependencies.
