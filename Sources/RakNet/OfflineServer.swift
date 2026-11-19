@@ -56,13 +56,17 @@ public struct OfflineServer: Sendable {
     }
 
     public func receive(_ datagram: [UInt8], from sender: IPv4Endpoint) -> Response? {
+        receive(datagram, from: sender, cookie: nil)
+    }
+
+    func receive(_ datagram: [UInt8], from sender: IPv4Endpoint, cookie: UInt32?) -> Response? {
         switch datagram.first {
         case 0x01, 0x02:
             guard datagram.count == 33, datagram[9..<25].elementsEqual(OfflineWire.magic) else {
                 return nil
             }
             return Response(datagram: [0x1c] + datagram[1..<9] + guid + OfflineWire.magic + advertisement, negotiation: nil)
-        case 0x05:
+        case OfflineWire.openRequestOne:
             guard datagram.count >= 18, datagram[1..<17].elementsEqual(OfflineWire.magic) else {
                 return nil
             }
@@ -74,19 +78,26 @@ public struct OfflineServer: Sendable {
                 return nil
             }
             let mtu = min(Int(maximumMTU) - headerSize, datagram.count) + headerSize
-            return Response(datagram: [0x06] + OfflineWire.magic + guid + [0] + bigEndianBytes(UInt16(mtu)), negotiation: nil)
-        case 0x07:
-            guard datagram.count == 34, datagram[1..<17].elementsEqual(OfflineWire.magic),
-                  datagram[17] == 4 else {
+            var reply = [OfflineWire.openReplyOne] + OfflineWire.magic + guid
+            reply.append(cookie == nil ? 0 : 1)
+            if let cookie { reply += bigEndianBytes(cookie) }
+            reply += bigEndianBytes(UInt16(mtu))
+            return Response(datagram: reply, negotiation: nil)
+        case OfflineWire.openRequestTwo:
+            let address = cookie == nil ? 17 : 22 // cookie and client security flag
+            guard datagram.count == address + 17, datagram[1..<17].elementsEqual(OfflineWire.magic),
+                  datagram[address] == 4 else {
                 return nil
             }
-            let requestedMTU = UInt16(wireBytes: datagram[24..<26])
+            if let cookie, UInt32(wireBytes: datagram[17..<21]) != cookie { return nil }
+            let mtuOffset = address + 7
+            let requestedMTU = UInt16(wireBytes: datagram[mtuOffset..<(mtuOffset + 2)])
             guard requestedMTU >= OfflineWire.mtuRange.lowerBound else {
                 return nil
             }
             let mtu = min(requestedMTU, maximumMTU)
             let reply = [0x08] + OfflineWire.magic + guid + sender.wireBytes + bigEndianBytes(mtu) + [0]
-            let clientGUID = Int64(wireBytes: datagram[26..<34])
+            let clientGUID = Int64(wireBytes: datagram.suffix(8))
             return Response(datagram: reply, negotiation: Negotiation(mtu: mtu, clientGUID: clientGUID))
         default:
             return nil
@@ -103,6 +114,9 @@ public enum IPv4MTU {
 }
 
 enum OfflineWire {
+    static let openRequestOne: UInt8 = 0x05
+    static let openReplyOne: UInt8 = 0x06
+    static let openRequestTwo: UInt8 = 0x07
     static let magic: [UInt8] = [
         0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe,
         0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78

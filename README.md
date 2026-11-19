@@ -13,7 +13,7 @@ A RakNet transport library for Minecraft: Bedrock Edition, written in Swift.
 
 - IPv4 discovery and RakNet 11 handshakes
 - Reliable ordered delivery with ACK/NACK, retransmission, and fragment reassembly
-- MTU negotiation and client support for server cookies
+- MTU negotiation and server cookie validation
 - Async clients and listeners backed by system UDP sockets
 
 ## Usage

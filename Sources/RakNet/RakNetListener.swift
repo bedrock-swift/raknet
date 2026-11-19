@@ -6,7 +6,7 @@ public final class RakNetListener: Sendable {
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
 
-    private init(socket: UDPSocket, server: OfflineServer, maximumConnections: Int) {
+    private init(socket: UDPSocket, server: OfflineServer, maximumConnections: Int, useCookies: Bool) {
         localAddress = socket.localAddress
         let accepted = TransportInbox<RakNetConnection>(limit: maximumConnections, byteLimit: maximumConnections)
         let commands = TransportCommands()
@@ -14,7 +14,7 @@ public final class RakNetListener: Sendable {
         self.commands = commands
 
         TransportDriver.launch(
-            socket: socket, role: .listen(server, maximumConnections: maximumConnections),
+            socket: socket, role: .listen(server, maximumConnections: maximumConnections, useCookies: useCookies),
             accepted: accepted, commands: commands
         )
     }
@@ -24,12 +24,13 @@ public final class RakNetListener: Sendable {
         guid: UInt64 = .random(in: 1...UInt64(Int64.max)),
         advertisement: [UInt8] = [],
         maximumMTU: UInt16 = IPv4MTU.defaultValue,
-        maximumConnections: Int = 128
+        maximumConnections: Int = 128,
+        useCookies: Bool = true
     ) throws -> RakNetListener {
         guard (1...4096).contains(maximumConnections) else { throw RakNetTransportError.invalidConnectionLimit }
         let server = try OfflineServer(guid: guid, advertisement: advertisement, maximumMTU: maximumMTU)
         let socket = try UDPSocket(bindTo: address, receiveTimeout: 20)
-        return RakNetListener(socket: socket, server: server, maximumConnections: maximumConnections)
+        return RakNetListener(socket: socket, server: server, maximumConnections: maximumConnections, useCookies: useCookies)
     }
 
     public func accept() async throws -> RakNetConnection? {
@@ -48,7 +49,7 @@ public final class RakNetListener: Sendable {
 
 struct TransportDriver {
     enum Role: Sendable {
-        case listen(OfflineServer, maximumConnections: Int)
+        case listen(OfflineServer, maximumConnections: Int, useCookies: Bool)
         case dial(IPv4Endpoint, mtu: UInt16, timeout: Duration)
     }
 
@@ -84,6 +85,7 @@ struct TransportDriver {
     private let commands: TransportCommands
     private var peers: [IPv4Endpoint: Peer] = [:]
     private var generation: UInt64 = 0
+    private var cookies = OfflineCookies()
     private var dial: DialAttempt?
 
     private init(
@@ -129,8 +131,8 @@ struct TransportDriver {
     }
 
     private mutating func receive(_ datagram: [UInt8], from address: IPv4Endpoint, at now: UInt64) throws {
-        if case let .listen(server, maximumConnections) = role,
-           let response = server.receive(datagram, from: address) {
+        if case let .listen(server, maximumConnections, useCookies) = role,
+           let response = offlineResponse(datagram, from: address, server: server, useCookies: useCookies, at: now) {
             handleOffline(response, from: address, at: now, maximumConnections: maximumConnections)
             return
         }
@@ -196,6 +198,24 @@ struct TransportDriver {
             peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
         case nil:
             break
+        }
+    }
+
+    private mutating func offlineResponse(
+        _ datagram: [UInt8], from address: IPv4Endpoint, server: OfflineServer, useCookies: Bool, at now: UInt64
+    ) -> OfflineServer.Response? {
+        guard useCookies else { return server.receive(datagram, from: address) }
+        switch datagram.first {
+        case OfflineWire.openRequestOne:
+            guard let response = server.receive(datagram, from: address) else { return nil }
+            guard response.datagram.first == OfflineWire.openReplyOne else { return response }
+            guard let cookie = cookies.issue(to: address, at: now) else { return nil }
+            return server.receive(datagram, from: address, cookie: cookie)
+        case OfflineWire.openRequestTwo:
+            guard let cookie = cookies.value(for: address, at: now) else { return nil }
+            return server.receive(datagram, from: address, cookie: cookie)
+        default:
+            return server.receive(datagram, from: address)
         }
     }
 
