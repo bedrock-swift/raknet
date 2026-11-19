@@ -7,6 +7,7 @@ public enum RakNetTransportError: Error, Equatable {
     case receiveBufferFull
     case sendQueueFull
     case invalidConnectionLimit
+    case invalidRemoteAddress
 }
 
 public final class RakNetConnection: Sendable {

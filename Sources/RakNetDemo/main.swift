@@ -1,11 +1,5 @@
 import RakNet
 
-func send(_ packets: [[UInt8]], to peer: IPv4Endpoint, through socket: UDPSocket) throws {
-    for packet in packets {
-        try socket.send(packet, to: peer)
-    }
-}
-
 func run(port: UInt16) async throws {
     let guid = UInt64.random(in: 1...UInt64(Int64.max))
     let advertisement = "MCPE;Bedrock Swift RakNet;0;prototype;0;0;\(guid);RakNet echo;Survival;1;\(port);0;"
@@ -33,7 +27,7 @@ if arguments.isEmpty {
 } else if arguments.count == 1, let port = UInt16(arguments[0]), port != 0 {
     try await run(port: port)
 } else if arguments.count == 2, arguments[0] == "--connect", let port = UInt16(arguments[1]), port != 0 {
-    try runEchoClient(port: port)
+    try await runEchoClient(port: port)
 } else {
     print("usage: raknet-demo [port] | raknet-demo --connect port")
 }

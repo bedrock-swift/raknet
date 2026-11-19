@@ -13,13 +13,10 @@ public final class RakNetListener: Sendable {
         self.accepted = accepted
         self.commands = commands
 
-        DispatchQueue(label: "raknet.listener").async { // socket owner
-            var driver = ListenerDriver(
-                socket: socket, server: server, maximumConnections: maximumConnections,
-                accepted: accepted, commands: commands
-            )
-            driver.run()
-        }
+        TransportDriver.launch(
+            socket: socket, role: .listen(server, maximumConnections: maximumConnections),
+            accepted: accepted, commands: commands
+        )
     }
 
     public static func listen(
@@ -49,7 +46,21 @@ public final class RakNetListener: Sendable {
     }
 }
 
-private struct ListenerDriver {
+struct TransportDriver {
+    enum Role: Sendable {
+        case listen(OfflineServer, maximumConnections: Int)
+        case dial(IPv4Endpoint, mtu: UInt16, timeout: Duration)
+    }
+
+    static func launch(
+        socket: UDPSocket, role: Role, accepted: TransportInbox<RakNetConnection>, commands: TransportCommands
+    ) {
+        DispatchQueue(label: "raknet.udp").async { // socket owner
+            var driver = TransportDriver(socket: socket, role: role, accepted: accepted, commands: commands)
+            driver.run()
+        }
+    }
+
     private final class Peer {
         let key: TransportPeerKey
         let mtu: UInt16
@@ -58,35 +69,36 @@ private struct ListenerDriver {
         var lastPacket: UInt64
         var nextPing: UInt64
 
-        init(key: TransportPeerKey, negotiation: OfflineServer.Negotiation, now: UInt64) throws {
+        init(key: TransportPeerKey, mtu: UInt16, connection: OnlineConnection, now: UInt64) {
             self.key = key
-            mtu = negotiation.mtu
-            connection = try OnlineConnection(accepting: key.address, negotiation: negotiation)
+            self.mtu = mtu
+            self.connection = connection
             lastPacket = now
             nextPing = now + 2_000
         }
     }
 
-    let socket: UDPSocket
-    let server: OfflineServer
-    let maximumConnections: Int
-    let accepted: TransportInbox<RakNetConnection>
-    let commands: TransportCommands
+    private let socket: UDPSocket
+    private let role: Role
+    private let accepted: TransportInbox<RakNetConnection>
+    private let commands: TransportCommands
     private var peers: [IPv4Endpoint: Peer] = [:]
     private var generation: UInt64 = 0
+    private var dial: DialAttempt?
 
-    init(
-        socket: UDPSocket, server: OfflineServer, maximumConnections: Int,
-        accepted: TransportInbox<RakNetConnection>, commands: TransportCommands
+    private init(
+        socket: UDPSocket, role: Role, accepted: TransportInbox<RakNetConnection>, commands: TransportCommands
     ) {
         self.socket = socket
-        self.server = server
-        self.maximumConnections = maximumConnections
+        self.role = role
         self.accepted = accepted
         self.commands = commands
+        if case let .dial(address, mtu, timeout) = role {
+            dial = DialAttempt(address: address, mtu: mtu, timeout: timeout)
+        }
     }
 
-    mutating func run() {
+    private mutating func run() {
         var failure: (any Error)?
         var buffer = [UInt8](repeating: 0, count: 65_507)
         var nextMaintenance: UInt64 = 0
@@ -102,30 +114,38 @@ private struct ListenerDriver {
                 let now = transportTime()
                 for command in commands.drain() { perform(command, at: now) }
                 if now >= nextMaintenance {
+                    try maintainDial(at: now)
                     maintain(at: now)
                     nextMaintenance = now + 20
                 }
                 if let datagram = try socket.receive(into: &buffer), commands.isOpen {
-                    receive(datagram.bytes, from: datagram.sender, at: transportTime())
+                    try receive(datagram.bytes, from: datagram.sender, at: transportTime())
                 }
+                if case .dial = role, dial == nil, peers.isEmpty { break }
             }
         } catch {
             failure = error
         }
     }
 
-    private mutating func receive(_ datagram: [UInt8], from address: IPv4Endpoint, at now: UInt64) {
-        if let response = server.receive(datagram, from: address) {
-            handleOffline(response, from: address, at: now)
+    private mutating func receive(_ datagram: [UInt8], from address: IPv4Endpoint, at now: UInt64) throws {
+        if case let .listen(server, maximumConnections) = role,
+           let response = server.receive(datagram, from: address) {
+            handleOffline(response, from: address, at: now, maximumConnections: maximumConnections)
             return
         }
 
-        guard let header = datagram.first, header & 0x80 != 0, let peer = peers[address] else { return }
+        guard let peer = peers[address] else {
+            try receiveDialReply(datagram, from: address, at: now)
+            return
+        }
+        guard let header = datagram.first, header & 0x80 != 0 else { return }
         do {
             let input = try peer.connection.receive(datagram, from: address, at: now)
             try send(input.replies, to: address)
             peer.lastPacket = now
             if input.opened {
+                dial = nil
                 let connection = RakNetConnection(
                     localAddress: socket.localAddress, key: peer.key, mtu: peer.mtu,
                     messages: peer.messages, commands: commands
@@ -143,19 +163,52 @@ private struct ListenerDriver {
                     return
                 }
             }
-            if input.closed { remove(address) }
+            if input.closed {
+                remove(address)
+                if dial != nil { throw RakNetTransportError.closed }
+            }
         } catch {
             remove(address, failure: error)
+            if dial != nil { throw error }
         }
     }
 
-    private mutating func handleOffline(_ response: OfflineServer.Response, from address: IPv4Endpoint, at now: UInt64) {
+    private mutating func maintainDial(at now: UInt64) throws {
+        guard var attempt = dial else { return }
+        guard !attempt.expired else { throw RakNetTransportError.timedOut }
+        if peers[attempt.address] == nil, let packet = try attempt.scheduledPacket(at: now) {
+            try socket.send(packet, to: attempt.address)
+        }
+        dial = attempt
+    }
+
+    private mutating func receiveDialReply(_ datagram: [UInt8], from address: IPv4Endpoint, at now: UInt64) throws {
+        guard var attempt = dial, attempt.address == address else { return }
+        let event = try attempt.receive(datagram, from: address, at: now)
+        dial = attempt
+        switch event {
+        case let .send(packet):
+            try socket.send(packet, to: address)
+        case let .negotiated(negotiation):
+            let key = TransportPeerKey(address: address, generation: generation)
+            var connection = try OnlineConnection(connectingTo: address, mtu: negotiation.mtu, clientGUID: attempt.guid)
+            try send(try connection.start(at: now), to: address)
+            peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
+        case nil:
+            break
+        }
+    }
+
+    private mutating func handleOffline(
+        _ response: OfflineServer.Response, from address: IPv4Endpoint, at now: UInt64, maximumConnections: Int
+    ) {
         do {
             if let negotiation = response.negotiation, peers[address] == nil {
                 guard peers.count < maximumConnections else { return }
                 let key = TransportPeerKey(address: address, generation: generation)
                 generation &+= 1 // reused udp endpoints
-                peers[address] = try Peer(key: key, negotiation: negotiation, now: now)
+                let connection = try OnlineConnection(accepting: address, negotiation: negotiation)
+                peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
             }
             try socket.send(response.datagram, to: address)
         } catch {
