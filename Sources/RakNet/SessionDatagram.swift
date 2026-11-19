@@ -1,8 +1,18 @@
 struct Frame: Equatable, Sendable {
     enum Reliability: UInt8, Sendable {
         case unreliable = 0
+        case unreliableSequenced = 1
         case reliable = 2
         case ordered = 3
+        case reliableSequenced = 4
+
+        var hasMessageIndex: Bool {
+            self == .reliable || self == .ordered || self == .reliableSequenced
+        }
+
+        var hasSequenceIndex: Bool {
+            self == .unreliableSequenced || self == .reliableSequenced
+        }
     }
 
     struct Order: Equatable, Hashable, Sendable {
@@ -18,13 +28,18 @@ struct Frame: Equatable, Sendable {
 
     let reliability: Reliability
     let messageIndex: UInt32?
+    let sequenceIndex: UInt32?
     let order: Order?
     let fragment: Fragment?
     let payload: [UInt8]
 
-    init(reliability: Reliability, messageIndex: UInt32?, order: Order?, fragment: Fragment?, payload: [UInt8]) {
+    init(
+        reliability: Reliability, messageIndex: UInt32?, sequenceIndex: UInt32? = nil,
+        order: Order?, fragment: Fragment?, payload: [UInt8]
+    ) {
         self.reliability = reliability
         self.messageIndex = messageIndex
+        self.sequenceIndex = sequenceIndex
         self.order = order
         self.fragment = fragment
         self.payload = payload
@@ -36,15 +51,23 @@ struct Frame: Equatable, Sendable {
               let bits = bytes.integer(UInt16.self), bits != 0 else { return nil }
 
         let messageIndex: UInt32?
-        if reliability == .unreliable {
+        if !reliability.hasMessageIndex {
             messageIndex = nil
         } else {
             guard let index = bytes.sequence() else { return nil }
             messageIndex = index
         }
 
+        let sequenceIndex: UInt32?
+        if reliability.hasSequenceIndex {
+            guard let index = bytes.sequence() else { return nil }
+            sequenceIndex = index
+        } else {
+            sequenceIndex = nil
+        }
+
         let order: Order?
-        if reliability == .ordered {
+        if reliability == .ordered || reliability.hasSequenceIndex {
             guard let index = bytes.sequence(), let channel = bytes.byte(), channel < 32 else { return nil }
             order = Order(index: index, channel: channel)
         } else {
@@ -62,7 +85,7 @@ struct Frame: Equatable, Sendable {
         }
         guard let payload = bytes.read((Int(bits) + 7) / 8) else { return nil } // bit length rounding
         self.init(
-            reliability: reliability, messageIndex: messageIndex,
+            reliability: reliability, messageIndex: messageIndex, sequenceIndex: sequenceIndex,
             order: order, fragment: fragment, payload: Array(payload)
         )
     }
@@ -73,6 +96,7 @@ struct Frame: Equatable, Sendable {
         bytes.append(header)
         bytes += bigEndianBytes(UInt16(payload.count * 8))
         if let messageIndex { bytes.appendSequence(messageIndex) }
+        if let sequenceIndex { bytes.appendSequence(sequenceIndex) }
         if let order {
             bytes.appendSequence(order.index)
             bytes.append(order.channel)

@@ -21,6 +21,12 @@ public struct ConnectedSession: Sendable {
     private struct FragmentKey: Hashable, Sendable {
         let id: UInt16
         let order: Frame.Order
+        let sequence: UInt32?
+    }
+
+    private struct SequencedPayload: Sendable {
+        let sequence: UInt32
+        let payload: [UInt8]
     }
 
     private struct Assembly: Sendable {
@@ -45,6 +51,8 @@ public struct ConnectedSession: Sendable {
     private var reliable = SequenceWindow(size: windowSize)
     private var expectedOrder = [UInt32](repeating: 0, count: 32)
     private var ordered: [Frame.Order: [UInt8]] = [:]
+    private var expectedSequence = [UInt32](repeating: 0, count: 32)
+    private var futureSequences: [Frame.Order: SequencedPayload] = [:]
     private var fragments: [FragmentKey: Assembly] = [:]
     private var bufferedBytes = 0
 
@@ -159,34 +167,96 @@ public struct ConnectedSession: Sendable {
         }
         let channel = Int(order.channel)
         let distance = (order.index &- expectedOrder[channel]) & Self.sequenceMask
-        if distance >= 0x00800000 || ordered[order] != nil { return }
+        guard distance < 0x00800000 else { return }
         guard distance < Self.windowSize else { throw SessionError.receiveWindowFull }
+
+        if let sequence = frame.sequenceIndex {
+            let minimum = distance == 0
+                ? expectedSequence[channel]
+                : futureSequences[order].map { ($0.sequence + 1) & Self.sequenceMask } ?? 0
+            guard Self.isCurrentOrNewer(sequence, than: minimum) else { return }
+        } else if ordered[order] != nil {
+            return
+        }
 
         let payload: [UInt8]
         if let fragment = frame.fragment {
-            guard let assembled = try assemble(fragment, order: order, payload: frame.payload) else { return }
+            guard frame.reliability.hasMessageIndex,
+                  let assembled = try assemble(fragment, order: order, sequence: frame.sequenceIndex,
+                                               payload: frame.payload) else { return }
             payload = assembled
         } else {
             payload = frame.payload
         }
 
-        if distance != 0 {
+        if let sequence = frame.sequenceIndex {
+            try deliverSequenced(payload, index: sequence, order: order, future: distance != 0, into: &payloads)
+        } else if distance != 0 {
             try reserve(payload.count)
             ordered[order] = payload
-            return
-        }
-        payloads.append(payload)
-        expectedOrder[channel] = (order.index + 1) & Self.sequenceMask
-        while let queued = ordered.removeValue(forKey: Frame.Order(index: expectedOrder[channel], channel: order.channel)) {
-            bufferedBytes -= queued.count
-            payloads.append(queued)
-            expectedOrder[channel] = (expectedOrder[channel] + 1) & Self.sequenceMask
+        } else {
+            payloads.append(payload)
+            advanceOrder(order, into: &payloads)
         }
     }
 
-    private mutating func assemble(_ fragment: Frame.Fragment, order: Frame.Order, payload: [UInt8]) throws -> [UInt8]? {
+    private static func isCurrentOrNewer(_ sequence: UInt32, than minimum: UInt32) -> Bool {
+        ((sequence &- minimum) & sequenceMask) < 0x00800000
+    }
+
+    private mutating func deliverSequenced(
+        _ payload: [UInt8], index: UInt32, order: Frame.Order, future: Bool, into payloads: inout [[UInt8]]
+    ) throws {
+        let next = (index + 1) & Self.sequenceMask
+        discardFragments(for: order, olderThan: next)
+        if future {
+            let currentSize = futureSequences[order]?.payload.count ?? 0
+            try reserve(payload.count - currentSize) // replace older queued update
+            futureSequences[order] = SequencedPayload(sequence: index, payload: payload)
+        } else {
+            expectedSequence[Int(order.channel)] = next
+            payloads.append(payload)
+        }
+    }
+
+    private mutating func advanceOrder(_ delivered: Frame.Order, into payloads: inout [[UInt8]]) {
+        let channel = Int(delivered.channel)
+        var order = delivered
+        while true {
+            discardFragments(for: order)
+            expectedSequence[channel] = 0 // sequence resets at each ordered frame
+            expectedOrder[channel] = (order.index + 1) & Self.sequenceMask
+            order = Frame.Order(index: expectedOrder[channel], channel: delivered.channel)
+            if let update = futureSequences.removeValue(forKey: order) {
+                bufferedBytes -= update.payload.count
+                expectedSequence[channel] = (update.sequence + 1) & Self.sequenceMask
+                payloads.append(update.payload)
+            }
+            guard let queued = ordered.removeValue(forKey: order) else { return }
+            bufferedBytes -= queued.count
+            payloads.append(queued)
+        }
+    }
+
+    private mutating func discardFragments(for order: Frame.Order, olderThan minimum: UInt32? = nil) {
+        let stale = fragments.keys.filter { key in
+            guard key.order == order else { return false }
+            guard let minimum else { return true }
+            guard let sequence = key.sequence else { return false }
+            return !Self.isCurrentOrNewer(sequence, than: minimum)
+        }
+        for key in stale {
+            if let assembly = fragments.removeValue(forKey: key) {
+                bufferedBytes -= assembly.bytes
+            }
+        }
+    }
+
+    private mutating func assemble(
+        _ fragment: Frame.Fragment, order: Frame.Order, sequence: UInt32?, payload: [UInt8]
+    ) throws -> [UInt8]? {
         guard fragment.count <= Self.fragmentLimit else { throw SessionError.receiveWindowFull }
-        let key = FragmentKey(id: fragment.id, order: order)
+        let key = FragmentKey(id: fragment.id, order: order, sequence: sequence)
         guard fragments[key] != nil || fragments.count < Self.fragmentLimit else {
             throw SessionError.receiveWindowFull
         }
