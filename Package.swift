@@ -8,12 +8,11 @@ let package = Package(
         .executable(name: "raknet-demo", targets: ["RakNetDemo"])
     ],
     targets: [
-        .target(name: "RakNet"),
-        .executableTarget(
-            name: "RakNetDemo",
-            dependencies: ["RakNet"],
+        .target(
+            name: "RakNet",
             linkerSettings: [.linkedLibrary("ws2_32", .when(platforms: [.windows]))]
         ),
+        .executableTarget(name: "RakNetDemo", dependencies: ["RakNet"]),
         .testTarget(name: "RakNetTests", dependencies: ["RakNet"])
     ]
 )

@@ -9,7 +9,8 @@ enum EchoClientError: Error {
 
 func runEchoClient(port: UInt16) throws {
     let endpoint = IPv4Endpoint(address: 0x7f000001, port: port)
-    let socket = try UDPSocket(port: 0)
+    let socket = try UDPSocket(bindTo: IPv4Endpoint(address: endpoint.address, port: 0))
+    var buffer = [UInt8](repeating: 0, count: 65_507)
     var offline = OfflineClient(server: endpoint)
     var connection: OnlineConnection?
     let probe = try offline.probe()
@@ -29,7 +30,7 @@ func runEchoClient(port: UInt16) throws {
             nextProbe = now + 350
         }
 
-        guard let datagram = try socket.receive() else { continue }
+        guard let datagram = try socket.receive(into: &buffer) else { continue }
         if var online = connection {
             let input = try online.receive(datagram.bytes, from: datagram.sender, at: now)
             try send(input.replies, to: endpoint, through: socket)

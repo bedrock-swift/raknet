@@ -1,5 +1,3 @@
-import RakNet
-
 #if os(Windows)
 import WinSDK
 private typealias SocketHandle = SOCKET
@@ -14,20 +12,21 @@ private typealias SocketHandle = Int32
 private typealias AddressLength = socklen_t
 #endif
 
-final class UDPSocket {
+package final class UDPSocket: Sendable {
     enum SocketError: Error {
         case startup(Int32)
         case create(Int32)
-        case bind(UInt16, Int32)
+        case bind(IPv4Endpoint, Int32)
         case configure(Int32)
+        case address(Int32)
         case receive(Int32)
         case send(Int32)
     }
 
     private let handle: SocketHandle
-    private var buffer = [UInt8](repeating: 0, count: 65_507)
+    package let localAddress: IPv4Endpoint
 
-    init(port: UInt16) throws {
+    package init(bindTo endpoint: IPv4Endpoint) throws {
         #if os(Windows)
         var data = WSADATA()
         let startup = WSAStartup(0x0202, &data)
@@ -50,7 +49,7 @@ final class UDPSocket {
             throw SocketError.create(error)
         }
 
-        var address = Self.socketAddress(for: IPv4Endpoint(address: 0x7f000001, port: port))
+        var address = Self.socketAddress(for: endpoint)
         let size = AddressLength(MemoryLayout<sockaddr_in>.size)
         let result = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(handle, $0, size) }
@@ -58,7 +57,7 @@ final class UDPSocket {
         guard result == 0 else {
             let error = Self.lastError
             Self.close(handle)
-            throw SocketError.bind(port, error)
+            throw SocketError.bind(endpoint, error)
         }
         let timeoutResult: Int32 // session timer wakeup
         #if os(Windows)
@@ -77,14 +76,24 @@ final class UDPSocket {
             Self.close(handle)
             throw SocketError.configure(error)
         }
+        var boundLength = size
+        let bound = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(handle, $0, &boundLength) }
+        }
+        guard bound == 0 else {
+            let error = Self.lastError
+            Self.close(handle)
+            throw SocketError.address(error)
+        }
         self.handle = handle
+        localAddress = Self.endpoint(for: address)
     }
 
     deinit {
         Self.close(handle)
     }
 
-    func receive() throws -> (bytes: [UInt8], sender: IPv4Endpoint)? {
+    package func receive(into buffer: inout [UInt8]) throws -> (bytes: [UInt8], sender: IPv4Endpoint)? {
         var address = sockaddr_in()
         var size = AddressLength(MemoryLayout<sockaddr_in>.size)
         let count = withUnsafeMutablePointer(to: &address) {
@@ -112,14 +121,10 @@ final class UDPSocket {
             throw SocketError.receive(error)
         }
 
-        let sender = IPv4Endpoint(
-            address: UInt32(bigEndian: address.sin_addr.networkAddress),
-            port: UInt16(bigEndian: address.sin_port)
-        )
-        return (Array(buffer.prefix(count)), sender)
+        return (Array(buffer.prefix(count)), Self.endpoint(for: address))
     }
 
-    func send(_ datagram: [UInt8], to endpoint: IPv4Endpoint) throws {
+    package func send(_ datagram: [UInt8], to endpoint: IPv4Endpoint) throws {
         var address = Self.socketAddress(for: endpoint)
         let size = AddressLength(MemoryLayout<sockaddr_in>.size)
         let count = withUnsafePointer(to: &address) {
@@ -145,6 +150,13 @@ final class UDPSocket {
             #endif
             throw SocketError.send(error)
         }
+    }
+
+    private static func endpoint(for address: sockaddr_in) -> IPv4Endpoint {
+        IPv4Endpoint(
+            address: UInt32(bigEndian: address.sin_addr.networkAddress),
+            port: UInt16(bigEndian: address.sin_port)
+        )
     }
 
     private static func socketAddress(for endpoint: IPv4Endpoint) -> sockaddr_in {

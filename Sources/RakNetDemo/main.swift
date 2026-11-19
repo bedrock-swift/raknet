@@ -16,13 +16,15 @@ func run(port: UInt16) throws {
     let guid = UInt64.random(in: 1...UInt64(Int64.max))
     let advertisement = "MCPE;Bedrock Swift RakNet;0;prototype;0;0;\(guid);RakNet echo;Survival;1;\(port);0;"
     let server = try OfflineServer(guid: guid, advertisement: Array(advertisement.utf8))
-    let socket = try UDPSocket(port: port)
+    let endpoint = IPv4Endpoint(address: 0x7f000001, port: port)
+    let socket = try UDPSocket(bindTo: endpoint)
     var peers: [IPv4Endpoint: Peer] = [:]
+    var buffer = [UInt8](repeating: 0, count: 65_507)
     var lastPoll: UInt64 = 0
 
     print("RakNet echo listening on 127.0.0.1:\(port)")
     while true {
-        let datagram = try socket.receive()
+        let datagram = try socket.receive(into: &buffer)
         let now = DispatchTime.now().uptimeNanoseconds / 1_000_000
         if let datagram {
             let sender = datagram.sender
