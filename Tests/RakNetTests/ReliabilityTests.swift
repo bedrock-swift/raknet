@@ -45,3 +45,34 @@ import Testing
     #expect(try receiver.receive(next, at: 1).payloads.isEmpty)
     #expect(try receiver.receive(ordered, at: 1).payloads == [[0xfe, 3], [0xfe, 4]])
 }
+
+
+@Test(arguments: [RakNetReliability.unreliableWithAckReceipt, .reliableWithAckReceipt, .reliableOrderedWithAckReceipt])
+func receiptModesDeliverAndAcknowledgePayload(_ reliability: RakNetReliability) throws {
+    var sender = try ConnectedSession(mtu: 1440)
+    var receiver = try ConnectedSession(mtu: 1440)
+    let payload: [UInt8] = [0xfe, 1]
+    let packet = try #require(sender.send(payload, reliability: reliability, at: 0).first)
+    let header = reliability.rawValue << 5
+    let indices: [UInt8]
+    switch reliability {
+    case .unreliableWithAckReceipt: indices = []
+    case .reliableWithAckReceipt: indices = [0, 0, 0]
+    default: indices = [0, 0, 0, 0, 0, 0, 0]
+    }
+    #expect(packet == [0x84, 0, 0, 0, header, 0, 16] + indices + payload)
+    let result = try receiver.receive(packet, at: 1)
+    #expect(result.payloads == [payload])
+    #expect(result.replies == [[0xc0, 0, 1, 1, 0, 0, 0]])
+    let retries = try sender.retransmit(at: 300)
+    #expect(retries.count == (reliability == .unreliableWithAckReceipt ? 0 : 1))
+}
+
+@Test func orderedReceiptModeSharesTheOrderingChannel() throws {
+    var sender = try ConnectedSession(mtu: 1440)
+    var receiver = try ConnectedSession(mtu: 1440)
+    let first = try #require(sender.send([0xfe, 1], reliability: .reliableOrderedWithAckReceipt, channel: 3, at: 0).first)
+    let second = try #require(sender.send([0xfe, 2], reliability: .reliableOrdered, channel: 3, at: 0).first)
+    #expect(try receiver.receive(second, at: 1).payloads.isEmpty)
+    #expect(try receiver.receive(first, at: 2).payloads == [[0xfe, 1], [0xfe, 2]])
+}

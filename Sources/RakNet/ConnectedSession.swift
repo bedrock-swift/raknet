@@ -87,7 +87,7 @@ public struct ConnectedSession: Sendable {
         let lane = Int(channel)
         let order = reliability.hasOrder ? Frame.Order(index: nextOrder[lane], channel: channel) : nil
         let sequence = reliability.hasSequenceIndex ? nextSequence[lane] : nil
-        if reliability == .reliableOrdered {
+        if reliability.isOrdered {
             nextOrder[lane] = (nextOrder[lane] + 1) & Self.sequenceMask
             nextSequence[lane] = 0
         } else if let sequence {

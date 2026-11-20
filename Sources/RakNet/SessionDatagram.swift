@@ -4,17 +4,24 @@ public enum RakNetReliability: UInt8, Sendable {
     case reliable = 2
     case reliableOrdered = 3
     case reliableSequenced = 4
+    case unreliableWithAckReceipt = 5
+    case reliableWithAckReceipt = 6
+    case reliableOrderedWithAckReceipt = 7
 
     var hasMessageIndex: Bool {
-        self == .reliable || self == .reliableOrdered || self == .reliableSequenced
+        self == .reliable || self == .reliableSequenced || self == .reliableWithAckReceipt || isOrdered
     }
 
     var hasSequenceIndex: Bool {
         self == .unreliableSequenced || self == .reliableSequenced
     }
 
+    var isOrdered: Bool {
+        self == .reliableOrdered || self == .reliableOrderedWithAckReceipt
+    }
+
     var hasOrder: Bool {
-        self == .reliableOrdered || hasSequenceIndex
+        isOrdered || hasSequenceIndex
     }
 }
 
