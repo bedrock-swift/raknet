@@ -435,7 +435,7 @@ struct TransportDriver {
                 guard case let .listen(listener) = role, snapshot.localAddress == socket.localAddress else {
                     throw RakNetTransportError.snapshotAddressMismatch
                 }
-                let peer = try register(snapshot.restore(), mtu: snapshot.mtu, listener: listener, at: now)
+                let peer = try register(snapshot.restore(at: now), mtu: snapshot.mtu, listener: listener, at: now)
                 for payload in snapshot.bufferedPayloads {
                     guard peer.messages.offer(payload, size: payload.count) else {
                         remove(peer.key.address)

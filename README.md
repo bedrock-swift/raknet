@@ -63,7 +63,7 @@ Use `RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 19132
 
 The default MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OnlineConnection` exposes the protocol state machine for applications that provide their own UDP I/O. Call `update(at:)` periodically to send pending acknowledgements, retries, and queued payloads.
 
-Use `try await connection.snapshot()` to capture an in-memory snapshot for custom I/O. It includes unread payloads and the monotonic time in milliseconds at capture. Use `connection.detach()` and `listener.adopt(snapshot)` to hand off a live session on the same local address.
+Use `try await connection.snapshot()` to capture an in-memory snapshot for custom I/O. It includes unread payloads and the monotonic time in milliseconds at capture. Call `snapshot.restore(at:)` to resume on a different monotonic clock. Use `connection.detach()` and `listener.adopt(snapshot)` to hand off a live session on the same local address.
 
 ## Development
 

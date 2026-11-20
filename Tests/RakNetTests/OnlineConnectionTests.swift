@@ -1,4 +1,4 @@
-import RakNet
+@testable import RakNet
 import Testing
 
 @Test(arguments: [false, true]) func onlineHandshakeTransfersPayloadAndCloses(useIPv6: Bool) throws {
@@ -63,6 +63,18 @@ import Testing
     let pong = try #require(pingResult.replies.first { $0.first == 0x84 })
     _ = try client.receive(pong, from: serverAddress, at: 90)
     #expect(try #require(client.roundTripTime) > beforePing)
+
+    var resumedServer = server
+    var source = client
+    _ = try source.send([0xfe, 0x42], at: 95)
+    let snapshot = RakNetSessionSnapshot(
+        localAddress: clientAddress, mtu: mtu, state: source, bufferedPayloads: [], capturedAt: 96
+    )
+    var resumed = snapshot.restore(at: 0)
+    #expect(try resumed.retransmit(at: 0).isEmpty)
+    let retry = try resumed.retransmit(at: 3_000)
+    try #require(retry.count == 1)
+    #expect(try resumedServer.receive(retry[0], from: clientAddress, at: 3_096).payloads == [[0xfe, 0x42]])
 
     for datagram in try client.close(at: 100) {
         let input = try server.receive(datagram, from: clientAddress, at: 101)

@@ -32,6 +32,7 @@ public struct OnlineConnection: Sendable {
     private var state: State
     private var session: ConnectedSession
     private var pendingPing: UInt64?
+    private var clockAnchor: (external: UInt64, session: UInt64)?
 
     public init(
         accepting client: IPv4Endpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false,
@@ -88,9 +89,10 @@ public struct OnlineConnection: Sendable {
 
     public mutating func start(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard case let .idle(guid) = state else { throw ConnectionError.invalidState }
-        let request = [0x09] + bigEndianBytes(guid) + bigEndianBytes(milliseconds) + [0]
-        let packets = try session.send(request, at: milliseconds)
-        state = .awaitingAcceptance(requestTime: milliseconds)
+        let time = sessionTime(milliseconds)
+        let request = [0x09] + bigEndianBytes(guid) + bigEndianBytes(time) + [0]
+        let packets = try session.send(request, at: time)
+        state = .awaitingAcceptance(requestTime: time)
         return packets
     }
 
@@ -103,7 +105,7 @@ public struct OnlineConnection: Sendable {
         priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
         guard isOpen else { throw ConnectionError.invalidState }
-        return try session.send(payload, reliability: reliability, channel: channel, priority: priority, at: milliseconds)
+        return try session.send(payload, reliability: reliability, channel: channel, priority: priority, at: sessionTime(milliseconds))
     }
 
     public mutating func sendBatch(
@@ -111,12 +113,14 @@ public struct OnlineConnection: Sendable {
         priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
         guard isOpen else { throw ConnectionError.invalidState }
-        return try session.sendBatch(payloads, reliability: reliability, channel: channel, priority: priority, at: milliseconds)
+        return try session.sendBatch(
+            payloads, reliability: reliability, channel: channel, priority: priority, at: sessionTime(milliseconds)
+        )
     }
 
     public mutating func close(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard isOpen else { throw ConnectionError.invalidState }
-        let packets = try session.send([0x15], at: milliseconds)
+        let packets = try session.send([0x15], at: sessionTime(milliseconds))
         state = .closing
         return packets
     }
@@ -127,18 +131,22 @@ public struct OnlineConnection: Sendable {
 
     public mutating func update(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard !isClosed else { return [] }
-        return try session.update(at: milliseconds)
+        return try session.update(at: sessionTime(milliseconds))
     }
 
     public mutating func retransmit(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard !isClosed else { return [] }
-        return try session.retransmit(at: milliseconds)
+        return try session.retransmit(at: sessionTime(milliseconds))
     }
 
     public mutating func keepalive(at milliseconds: UInt64) -> [UInt8]? {
         guard isOpen else { return nil }
-        pendingPing = milliseconds
-        return session.sendControl([0x00] + bigEndianBytes(milliseconds))
+        return makeKeepalive(at: sessionTime(milliseconds))
+    }
+
+    private mutating func makeKeepalive(at time: UInt64) -> [UInt8] {
+        pendingPing = time
+        return session.sendControl([0x00] + bigEndianBytes(time))
     }
 
     public mutating func receive(
@@ -153,7 +161,8 @@ public struct OnlineConnection: Sendable {
         guard sender == peer, state != .closed else { return Input() }
         if case .idle = state { return Input() }
 
-        let result = try session.receive(datagram, at: milliseconds)
+        let time = sessionTime(milliseconds)
+        let result = try session.receive(datagram, at: time)
         var input = Input(replies: result.replies)
         if state == .closing, !session.hasPending {
             state = .closed
@@ -162,7 +171,7 @@ public struct OnlineConnection: Sendable {
             return input
         }
         for payload in result.payloads {
-            try handle(payload, at: milliseconds, into: &input)
+            try handle(payload, at: time, into: &input)
         }
         if input.closed, let ack = flushAcknowledgements() { input.replies.append(ack) }
         return input
@@ -200,7 +209,7 @@ public struct OnlineConnection: Sendable {
             let pong = [0x03] + packet[1..<9] + bigEndianBytes(time)
             input.replies.append(session.sendControl(pong))
         case (.open, 0x04):
-            if let ping = keepalive(at: time) { input.replies.append(ping) }
+            input.replies.append(makeKeepalive(at: time))
         case (.open, 0x03):
             guard packet.count == 17, let pendingPing, time >= pendingPing,
                   UInt64(wireBytes: packet[1..<9]) == pendingPing else { return } // outstanding ping echo
@@ -216,6 +225,18 @@ public struct OnlineConnection: Sendable {
         default:
             break
         }
+    }
+
+    mutating func rebaseClock(from capturedAt: UInt64, to milliseconds: UInt64) {
+        clockAnchor = (milliseconds, sessionTime(capturedAt))
+    }
+
+    private func sessionTime(_ milliseconds: UInt64) -> UInt64 {
+        guard let anchor = clockAnchor else { return milliseconds }
+        if milliseconds >= anchor.external {
+            return anchor.session + min(milliseconds - anchor.external, UInt64.max - anchor.session)
+        }
+        return anchor.session - min(anchor.external - milliseconds, anchor.session)
     }
 
     private var localAddresses: [UInt8] {

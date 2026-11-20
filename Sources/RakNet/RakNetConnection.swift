@@ -36,6 +36,12 @@ public struct RakNetSessionSnapshot: Sendable {
     public func restore() -> OnlineConnection {
         state
     }
+
+    public func restore(at milliseconds: UInt64) -> OnlineConnection {
+        var connection = state
+        connection.rebaseClock(from: capturedAt, to: milliseconds)
+        return connection
+    }
 }
 
 public final class RakNetConnection: Sendable {
