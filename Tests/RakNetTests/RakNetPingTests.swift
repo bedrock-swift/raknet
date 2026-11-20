@@ -51,3 +51,29 @@ import Testing
         try await pending.value
     }
 }
+
+
+@Test func listenerUpdatesAdvertisementWhileRunning() async throws {
+    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let listener = try RakNetListener.listen(on: endpoint, advertisement: [1])
+    defer { listener.close() }
+
+    try listener.setAdvertisement([2])
+    let updated = try await RakNetConnection.ping(listener.localAddress)
+    #expect(updated.advertisement == [2])
+
+    listener.setAdvertisementProvider { address in bigEndianBytes(address.address) }
+    let generated = try await RakNetConnection.ping(listener.localAddress)
+    #expect(generated.advertisement == [0x7f, 0, 0, 1])
+
+    listener.setAdvertisementProvider { _ in [UInt8](repeating: 0, count: 1440) }
+    let fallback = try await RakNetConnection.ping(listener.localAddress)
+    #expect(fallback.advertisement == [2])
+
+    listener.setAdvertisementProvider(nil)
+    #expect(throws: OfflineServer.ConfigurationError.advertisementTooLong) {
+        try listener.setAdvertisement([UInt8](repeating: 0, count: 1440))
+    }
+    let unchanged = try await RakNetConnection.ping(listener.localAddress)
+    #expect(unchanged.advertisement == [2])
+}

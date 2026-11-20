@@ -1,20 +1,27 @@
 import Dispatch
+import Foundation
 
 public final class RakNetListener: Sendable {
     public let localAddress: IPv4Endpoint
 
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
+    private let advertisement: TransportAdvertisement
 
-    private init(socket: UDPSocket, server: OfflineServer, maximumConnections: Int, useCookies: Bool) {
+    private init(
+        socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16, maximumConnections: Int, useCookies: Bool
+    ) {
         localAddress = socket.localAddress
         let accepted = TransportInbox<RakNetConnection>(limit: maximumConnections, byteLimit: maximumConnections)
         let commands = TransportCommands()
         self.accepted = accepted
         self.commands = commands
+        let advertisement = TransportAdvertisement(encoded: server.advertisement, maximumMTU: maximumMTU)
+        self.advertisement = advertisement
 
         TransportDriver.launch(
-            socket: socket, role: .listen(server, maximumConnections: maximumConnections, useCookies: useCookies),
+            socket: socket,
+            role: .listen(server, advertisement, maximumConnections: maximumConnections, useCookies: useCookies),
             accepted: accepted, commands: commands
         )
     }
@@ -30,7 +37,18 @@ public final class RakNetListener: Sendable {
         guard (1...4096).contains(maximumConnections) else { throw RakNetTransportError.invalidConnectionLimit }
         let server = try OfflineServer(guid: guid, advertisement: advertisement, maximumMTU: maximumMTU)
         let socket = try UDPSocket(bindTo: address, receiveTimeout: 20)
-        return RakNetListener(socket: socket, server: server, maximumConnections: maximumConnections, useCookies: useCookies)
+        return RakNetListener(
+            socket: socket, server: server, maximumMTU: maximumMTU,
+            maximumConnections: maximumConnections, useCookies: useCookies
+        )
+    }
+
+    public func setAdvertisement(_ data: [UInt8]) throws {
+        try advertisement.set(data)
+    }
+
+    public func setAdvertisementProvider(_ provider: (@Sendable (IPv4Endpoint) -> [UInt8])?) {
+        advertisement.setProvider(provider)
     }
 
     public func accept() async throws -> RakNetConnection? {
@@ -47,9 +65,36 @@ public final class RakNetListener: Sendable {
     }
 }
 
+final class TransportAdvertisement: @unchecked Sendable {
+    private let lock = NSLock()
+    private let maximumMTU: UInt16
+    private var encoded: [UInt8]
+    private var provider: (@Sendable (IPv4Endpoint) -> [UInt8])?
+
+    init(encoded: [UInt8], maximumMTU: UInt16) {
+        self.encoded = encoded
+        self.maximumMTU = maximumMTU
+    }
+
+    func set(_ data: [UInt8]) throws {
+        let value = try OfflineServer.encodeAdvertisement(data, maximumMTU: maximumMTU)
+        lock.withLock { encoded = value }
+    }
+
+    func setProvider(_ provider: (@Sendable (IPv4Endpoint) -> [UInt8])?) {
+        lock.withLock { self.provider = provider }
+    }
+
+    func data(for sender: IPv4Endpoint) -> [UInt8] {
+        let (provider, fallback) = lock.withLock { (provider, encoded) }
+        guard let provider else { return fallback }
+        return (try? OfflineServer.encodeAdvertisement(provider(sender), maximumMTU: maximumMTU)) ?? fallback
+    }
+}
+
 struct TransportDriver {
     enum Role: Sendable {
-        case listen(OfflineServer, maximumConnections: Int, useCookies: Bool)
+        case listen(OfflineServer, TransportAdvertisement, maximumConnections: Int, useCookies: Bool)
         case dial(IPv4Endpoint, mtu: UInt16, timeout: Duration)
     }
 
@@ -132,8 +177,10 @@ struct TransportDriver {
     }
 
     private mutating func receive(_ datagram: [UInt8], from address: IPv4Endpoint, at now: UInt64) throws {
-        if case let .listen(server, maximumConnections, useCookies) = role,
-           let response = offlineResponse(datagram, from: address, server: server, useCookies: useCookies, at: now) {
+        if case let .listen(server, advertisement, maximumConnections, useCookies) = role,
+           let response = offlineResponse(
+               datagram, from: address, server: server, advertisement: advertisement, useCookies: useCookies, at: now
+           ) {
             handleOffline(response, from: address, at: now, maximumConnections: maximumConnections)
             return
         }
@@ -204,20 +251,20 @@ struct TransportDriver {
     }
 
     private mutating func offlineResponse(
-        _ datagram: [UInt8], from address: IPv4Endpoint, server: OfflineServer, useCookies: Bool, at now: UInt64
+        _ datagram: [UInt8], from address: IPv4Endpoint, server: OfflineServer,
+        advertisement: TransportAdvertisement, useCookies: Bool, at now: UInt64
     ) -> OfflineServer.Response? {
-        guard useCookies else { return server.receive(datagram, from: address) }
         switch datagram.first {
-        case OfflineWire.openRequestOne:
+        case OfflineWire.openRequestOne where useCookies:
             guard let response = server.receive(datagram, from: address) else { return nil }
             guard response.datagram.first == OfflineWire.openReplyOne else { return response }
             guard let cookie = cookies.issue(to: address, at: now) else { return nil }
             return server.receive(datagram, from: address, cookie: cookie)
-        case OfflineWire.openRequestTwo:
+        case OfflineWire.openRequestTwo where useCookies:
             guard let cookie = cookies.value(for: address, at: now) else { return nil }
             return server.receive(datagram, from: address, cookie: cookie)
         default:
-            return server.receive(datagram, from: address)
+            return server.receive(datagram, from: address, cookie: nil) { advertisement.data(for: address) }
         }
     }
 

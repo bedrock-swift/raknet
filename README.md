@@ -50,6 +50,7 @@ try await connection.close()
 ```
 
 Use `try await RakNetConnection.ping(address)` to read the server advertisement and round-trip time.
+Use `listener.setAdvertisement(_:)` to update the advertisement or `listener.setAdvertisementProvider(_:)` to generate it per peer. If the provider returns an oversized advertisement, the listener uses the configured static bytes.
 
 Read `connection.roundTripTime` for the smoothed RTT once a measurement is available.
 

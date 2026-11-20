@@ -29,7 +29,7 @@ public struct OfflineServer: Sendable {
     }
 
     private let guid: [UInt8]
-    private let advertisement: [UInt8]
+    let advertisement: [UInt8]
     private let protocolVersion: UInt8
     private let maximumMTU: UInt16
 
@@ -42,13 +42,17 @@ public struct OfflineServer: Sendable {
         guard OfflineWire.mtuRange.contains(maximumMTU) else {
             throw ConfigurationError.invalidMTU
         }
+        self.guid = bigEndianBytes(guid)
+        self.advertisement = try Self.encodeAdvertisement(advertisement, maximumMTU: maximumMTU)
+        self.protocolVersion = protocolVersion
+        self.maximumMTU = maximumMTU
+    }
+
+    static func encodeAdvertisement(_ advertisement: [UInt8], maximumMTU: UInt16) throws -> [UInt8] {
         guard advertisement.count <= Int(maximumMTU) - OfflineWire.ipv4UDPOverhead - 35 else {
             throw ConfigurationError.advertisementTooLong
         }
-        self.guid = bigEndianBytes(guid)
-        self.advertisement = bigEndianBytes(UInt16(advertisement.count)) + advertisement
-        self.protocolVersion = protocolVersion
-        self.maximumMTU = maximumMTU
+        return bigEndianBytes(UInt16(advertisement.count)) + advertisement
     }
 
     public func reply(to datagram: [UInt8], from sender: IPv4Endpoint) -> [UInt8]? {
@@ -59,13 +63,17 @@ public struct OfflineServer: Sendable {
         receive(datagram, from: sender, cookie: nil)
     }
 
-    func receive(_ datagram: [UInt8], from sender: IPv4Endpoint, cookie: UInt32?) -> Response? {
+    func receive(
+        _ datagram: [UInt8], from sender: IPv4Endpoint, cookie: UInt32?,
+        advertisement override: (() -> [UInt8])? = nil
+    ) -> Response? {
         switch datagram.first {
         case 0x01, 0x02:
             guard datagram.count == 33, datagram[9..<25].elementsEqual(OfflineWire.magic) else {
                 return nil
             }
-            return Response(datagram: [0x1c] + datagram[1..<9] + guid + OfflineWire.magic + advertisement, negotiation: nil)
+            let data = override?() ?? advertisement
+            return Response(datagram: [0x1c] + datagram[1..<9] + guid + OfflineWire.magic + data, negotiation: nil)
         case OfflineWire.openRequestOne:
             guard datagram.count >= 18, datagram[1..<17].elementsEqual(OfflineWire.magic) else {
                 return nil
