@@ -20,11 +20,15 @@ public struct OnlineConnection: Sendable {
         case closed
     }
 
-    private static let localAddresses = Array(
+    private static let ipv4SystemAddresses = Array(
         repeating: IPv4Endpoint(address: 0, port: 0).wireBytes, count: 20 // system address slots
     ).flatMap { $0 }
 
-    public let peer: IPv4Endpoint
+    private static let ipv6SystemAddresses = Array(
+        repeating: IPv6Endpoint(addressHigh: 0, addressLow: 0, port: 0).wireBytes, count: 20
+    ).flatMap { $0 }
+
+    public let peer: RakNetEndpoint
     private var state: State
     private var session: ConnectedSession
     private var pendingPing: UInt64?
@@ -32,17 +36,31 @@ public struct OnlineConnection: Sendable {
     public init(
         accepting client: IPv4Endpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false
     ) throws {
+        try self.init(accepting: .ipv4(client), negotiation: negotiation, batchAcknowledgements: batchAcknowledgements)
+    }
+
+    public init(
+        accepting client: RakNetEndpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false
+    ) throws {
         peer = client
         state = .awaitingRequest(clientGUID: negotiation.clientGUID)
-        session = try ConnectedSession(mtu: negotiation.mtu, batchAcknowledgements: batchAcknowledgements)
+        session = try ConnectedSession(mtu: negotiation.mtu, udpOverhead: client.udpOverhead, batchAcknowledgements: batchAcknowledgements)
     }
 
     public init(
         connectingTo server: IPv4Endpoint, mtu: UInt16, clientGUID: Int64, batchAcknowledgements: Bool = false
     ) throws {
+        try self.init(
+            connectingTo: .ipv4(server), mtu: mtu, clientGUID: clientGUID, batchAcknowledgements: batchAcknowledgements
+        )
+    }
+
+    public init(
+        connectingTo server: RakNetEndpoint, mtu: UInt16, clientGUID: Int64, batchAcknowledgements: Bool = false
+    ) throws {
         peer = server
         state = .idle(clientGUID: clientGUID)
-        session = try ConnectedSession(mtu: mtu, batchAcknowledgements: batchAcknowledgements)
+        session = try ConnectedSession(mtu: mtu, udpOverhead: server.udpOverhead, batchAcknowledgements: batchAcknowledgements)
     }
 
     public var isOpen: Bool { state == .open }
@@ -93,6 +111,12 @@ public struct OnlineConnection: Sendable {
     public mutating func receive(
         _ datagram: [UInt8], from sender: IPv4Endpoint, at milliseconds: UInt64
     ) throws -> Input {
+        try receive(datagram, from: .ipv4(sender), at: milliseconds)
+    }
+
+    public mutating func receive(
+        _ datagram: [UInt8], from sender: RakNetEndpoint, at milliseconds: UInt64
+    ) throws -> Input {
         guard sender == peer, state != .closed else { return Input() }
         if case .idle = state { return Input() }
 
@@ -120,7 +144,7 @@ public struct OnlineConnection: Sendable {
             var reply: [UInt8] = [0x10]
             reply += peer.wireBytes
             reply += [0, 0]
-            reply += Self.localAddresses
+            reply += localAddresses
             reply += packet[9..<17]
             reply += bigEndianBytes(time)
             input.replies += try session.send(reply, at: time)
@@ -128,7 +152,7 @@ public struct OnlineConnection: Sendable {
         case let (.awaitingAcceptance(requestTime), 0x10):
             guard let times = Self.timestamps(in: packet, includesSystemIndex: true),
                   times.echoed == requestTime else { return } // request timestamp echo
-            let reply = [0x13] + peer.wireBytes + Self.localAddresses
+            let reply = [0x13] + peer.wireBytes + localAddresses
                 + bigEndianBytes(times.original) + bigEndianBytes(time)
             input.replies += try session.send(reply, at: time)
             state = .open
@@ -158,6 +182,13 @@ public struct OnlineConnection: Sendable {
             input.payloads.append(packet)
         default:
             break
+        }
+    }
+
+    private var localAddresses: [UInt8] {
+        switch peer {
+        case .ipv4: Self.ipv4SystemAddresses
+        case .ipv6: Self.ipv6SystemAddresses
         }
     }
 

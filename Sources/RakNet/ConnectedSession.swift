@@ -62,8 +62,12 @@ public struct ConnectedSession: Sendable {
     private var bufferedBytes = 0
 
     public init(mtu: UInt16, batchAcknowledgements: Bool = false) throws {
+        try self.init(mtu: mtu, udpOverhead: OfflineWire.ipv4UDPOverhead, batchAcknowledgements: batchAcknowledgements)
+    }
+
+    init(mtu: UInt16, udpOverhead: Int, batchAcknowledgements: Bool) throws {
         guard OfflineWire.mtuRange.contains(mtu) else { throw SessionError.invalidMTU }
-        datagramLimit = Int(mtu) - OfflineWire.ipv4UDPOverhead
+        datagramLimit = Int(mtu) - udpOverhead
         peerDatagramLimit = Int(mtu) // peer udp mtu convention
         self.batchAcknowledgements = batchAcknowledgements
     }

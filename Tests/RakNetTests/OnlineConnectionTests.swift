@@ -1,10 +1,15 @@
 import RakNet
 import Testing
 
-@Test func onlineHandshakeTransfersPayloadAndCloses() throws {
-    let serverAddress = IPv4Endpoint(address: 0x7f000001, port: 19132)
-    let clientAddress = IPv4Endpoint(address: 0x7f000001, port: 48000)
-    let offlineServer = try OfflineServer(guid: 42, advertisement: [])
+@Test(arguments: [false, true]) func onlineHandshakeTransfersPayloadAndCloses(useIPv6: Bool) throws {
+    let serverAddress: RakNetEndpoint = useIPv6
+        ? .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 19132))
+        : .ipv4(IPv4Endpoint(address: 0x7f000001, port: 19132))
+    let clientAddress: RakNetEndpoint = useIPv6
+        ? .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 48000))
+        : .ipv4(IPv4Endpoint(address: 0x7f000001, port: 48000))
+    let mtu: UInt16 = useIPv6 ? 400 : 1440
+    let offlineServer = try OfflineServer(guid: 42, advertisement: [], maximumMTU: mtu)
     var offlineClient = OfflineClient(server: serverAddress, guid: -123)
     let probe = try offlineClient.probe()
     let offer = try #require(offlineServer.reply(to: probe, from: clientAddress))
@@ -42,6 +47,7 @@ import Testing
     let data = [UInt8](repeating: 0xfe, count: 4096)
     var messages: [[UInt8]] = []
     for datagram in try client.send(data, at: 6).reversed() {
+            #expect(datagram.count <= Int(mtu) - (useIPv6 ? 48 : 28))
         let input = try server.receive(datagram, from: clientAddress, at: 7)
         messages += input.payloads
         for reply in input.replies where reply.first == 0xc0 {
