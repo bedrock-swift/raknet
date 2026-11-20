@@ -117,3 +117,32 @@ import Testing
     let remainder = receiver.flushAcknowledgements()
     #expect(remainder?.count == 35)
 }
+
+@Test func sessionPacksFramesAndRetriesAMissingDatagram() throws {
+    var sender = try ConnectedSession(mtu: 400)
+    var receiver = try ConnectedSession(mtu: 400)
+    let payloads: [[UInt8]] = [[UInt8](repeating: 0xfe, count: 400), [0xfd], [0xfc]]
+    let packets = try sender.sendBatch(payloads, at: 0)
+    try #require(packets.count == 2)
+    #expect(packets.allSatisfy { $0.count <= 372 })
+
+    let gap = try receiver.receive(packets[1], at: 1)
+    #expect(gap.payloads.isEmpty)
+    let nack = try #require(gap.replies.first { $0.first == 0xa0 })
+    let retried = try sender.receive(nack, at: 2)
+    let retry = try #require(retried.replies.first)
+    #expect(Array(retry.dropFirst(4)) == Array(packets[0].dropFirst(4)))
+    #expect(try receiver.receive(retry, at: 3).payloads == payloads)
+    #expect(try receiver.receive(packets[0], at: 4).payloads.isEmpty)
+}
+
+@Test func invalidBatchDoesNotConsumeOrderingIndices() throws {
+    var sender = try ConnectedSession(mtu: 400)
+    #expect(throws: ConnectedSession.SessionError.invalidPayloadSize) {
+        try sender.sendBatch([[0xfe], [], [0xfd]], at: 0)
+    }
+    var receiver = try ConnectedSession(mtu: 400)
+    let packets = try sender.sendBatch([[0xfe], [0xfd]], at: 1)
+    try #require(packets.count == 1)
+    #expect(try receiver.receive(packets[0], at: 2).payloads == [[0xfe], [0xfd]])
+}

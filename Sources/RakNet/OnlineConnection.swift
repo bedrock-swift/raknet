@@ -86,6 +86,13 @@ public struct OnlineConnection: Sendable {
         return try session.send(payload, reliability: reliability, channel: channel, at: milliseconds)
     }
 
+    public mutating func sendBatch(
+        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0, at milliseconds: UInt64
+    ) throws -> [[UInt8]] {
+        guard isOpen else { throw ConnectionError.invalidState }
+        return try session.sendBatch(payloads, reliability: reliability, channel: channel, at: milliseconds)
+    }
+
     public mutating func close(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard isOpen else { throw ConnectionError.invalidState }
         let packets = try session.send([0x15], at: milliseconds)

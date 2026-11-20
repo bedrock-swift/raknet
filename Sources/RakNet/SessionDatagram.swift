@@ -101,6 +101,11 @@ struct Frame: Equatable, Sendable {
         )
     }
 
+    var encodedSize: Int {
+        3 + (messageIndex == nil ? 0 : 3) + (sequenceIndex == nil ? 0 : 3)
+            + (order == nil ? 0 : 4) + (fragment == nil ? 0 : 10) + payload.count
+    }
+
     func encode(into bytes: inout [UInt8]) {
         var header = reliability.rawValue << 5
         if fragment != nil { header |= 0x10 }
@@ -122,6 +127,8 @@ struct Frame: Equatable, Sendable {
 }
 
 enum SessionDatagram {
+    static let frameHeaderSize = 4
+
     case frames(UInt32, [Frame])
     case acknowledgement([UInt32])
     case negativeAcknowledgement([UInt32])
@@ -164,9 +171,13 @@ enum SessionDatagram {
     }
 
     static func encode(sequence: UInt32, frame: Frame) -> [UInt8] {
+        encode(sequence: sequence, frames: [frame])
+    }
+
+    static func encode(sequence: UInt32, frames: [Frame]) -> [UInt8] {
         var bytes: [UInt8] = [0x84]
         bytes.appendSequence(sequence)
-        frame.encode(into: &bytes)
+        for frame in frames { frame.encode(into: &bytes) }
         return bytes
     }
 
