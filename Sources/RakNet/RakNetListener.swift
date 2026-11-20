@@ -171,6 +171,12 @@ struct TransportDriver {
     enum Role: Sendable {
         case listen(Listener)
         case dial(RakNetEndpoint, mtu: UInt16, timeout: Duration)
+        case resume
+
+        var isClient: Bool {
+            if case .listen = self { return false }
+            return true
+        }
     }
 
     static func launch(
@@ -245,6 +251,7 @@ struct TransportDriver {
             while commands.isOpen {
                 let now = transportTime()
                 for command in commands.drain() { perform(command, at: now) }
+                guard commands.isOpen else { break }
                 if now >= nextMaintenance {
                     try maintainDial(at: now)
                     maintain(at: now)
@@ -253,10 +260,29 @@ struct TransportDriver {
                 if let datagram = try socket.receive(into: &buffer), commands.isOpen {
                     try receive(datagram.bytes, from: datagram.sender, at: transportTime())
                 }
-                if case .dial = role, dial == nil, peers.isEmpty { break }
+                if role.isClient, dial == nil, peers.isEmpty { break }
             }
         } catch {
             failure = error
+        }
+    }
+
+    private mutating func startResumedClient(_ snapshot: RakNetSessionSnapshot, at now: UInt64) throws -> RakNetConnection {
+        guard peers.isEmpty else { throw RakNetTransportError.connectionAlreadyExists }
+        let key = TransportPeerKey(address: snapshot.remoteAddress, generation: generation)
+        let connection = snapshot.restore(at: now)
+        let peer = Peer(key: key, mtu: snapshot.mtu, connection: connection, now: now)
+        peer.metrics.update(from: connection)
+        try restoreBufferedPayloads(snapshot, to: peer)
+        peers[key.address] = peer
+        return connectionHandle(for: peer)
+    }
+
+    private func restoreBufferedPayloads(_ snapshot: RakNetSessionSnapshot, to peer: Peer) throws {
+        for payload in snapshot.bufferedPayloads {
+            guard peer.messages.offer(payload, size: payload.count) else {
+                throw RakNetTransportError.receiveBufferFull
+            }
         }
     }
 
@@ -429,18 +455,27 @@ struct TransportDriver {
                     localAddress: socket.localAddress, mtu: peer.mtu, state: peer.connection,
                     bufferedPayloads: buffered, capturedAt: now
                 )
-                if detach { remove(key.address) }
+                if detach {
+                    remove(key.address)
+                    if role.isClient {
+                        socket.close()
+                        commands.stop()
+                    }
+                }
                 continuation.resume(returning: snapshot)
             case let .adopt(snapshot, continuation):
-                guard case let .listen(listener) = role, snapshot.localAddress == socket.localAddress else {
-                    throw RakNetTransportError.snapshotAddressMismatch
+                guard snapshot.localAddress == socket.localAddress else { throw RakNetTransportError.snapshotAddressMismatch }
+                if case .resume = role {
+                    continuation.resume(returning: try startResumedClient(snapshot, at: now))
+                    return
                 }
+                guard case let .listen(listener) = role else { throw RakNetTransportError.closed }
                 let peer = try register(snapshot.restore(at: now), mtu: snapshot.mtu, listener: listener, at: now)
-                for payload in snapshot.bufferedPayloads {
-                    guard peer.messages.offer(payload, size: payload.count) else {
-                        remove(peer.key.address)
-                        throw RakNetTransportError.receiveBufferFull
-                    }
+                do {
+                    try restoreBufferedPayloads(snapshot, to: peer)
+                } catch {
+                    remove(peer.key.address)
+                    throw error
                 }
                 continuation.resume(returning: connectionHandle(for: peer))
             }

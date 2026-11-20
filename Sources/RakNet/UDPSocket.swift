@@ -1,3 +1,5 @@
+import Foundation
+
 #if os(Windows)
 import WinSDK
 private typealias SocketHandle = SOCKET
@@ -12,7 +14,7 @@ private typealias SocketHandle = Int32
 private typealias AddressLength = socklen_t
 #endif
 
-package final class UDPSocket: Sendable {
+package final class UDPSocket: @unchecked Sendable {
     enum SocketError: Error {
         case startup(Int32)
         case create(Int32)
@@ -24,6 +26,8 @@ package final class UDPSocket: Sendable {
     }
 
     private let handle: SocketHandle
+    private let closeLock = NSLock()
+    private var closed = false
     package let localAddress: RakNetEndpoint
 
     package convenience init(bindTo endpoint: IPv4Endpoint, receiveTimeout: UInt32 = 100) throws {
@@ -114,7 +118,15 @@ package final class UDPSocket: Sendable {
     }
 
     deinit {
-        Self.close(handle)
+        close()
+    }
+
+    func close() {
+        closeLock.withLock {
+            guard !closed else { return }
+            closed = true
+            Self.close(handle)
+        }
     }
 
     package func receive(into buffer: inout [UInt8]) throws -> (bytes: [UInt8], sender: RakNetEndpoint)? {

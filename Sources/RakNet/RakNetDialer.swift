@@ -28,10 +28,25 @@ public extension RakNetConnection {
         guard timeout > .zero else { throw RakNetTransportError.timedOut }
 
         let socket = try UDPSocket(clientFor: address)
+        return try await startClient(socket: socket, role: .dial(address, mtu: mtu, timeout: timeout))
+    }
+
+    static func resume(_ snapshot: RakNetSessionSnapshot) async throws -> RakNetConnection {
+        try Task.checkCancellation()
+        let socket = try UDPSocket(bindTo: snapshot.localAddress, receiveTimeout: 20)
+        let accepted = TransportInbox<RakNetConnection>(limit: 1, byteLimit: 1)
+        let commands = TransportCommands()
+        return try await withCheckedThrowingContinuation { continuation in
+            commands.submit(.adopt(snapshot, continuation))
+            TransportDriver.launch(socket: socket, role: .resume, accepted: accepted, commands: commands)
+        }
+    }
+
+    private static func startClient(socket: UDPSocket, role: TransportDriver.Role) async throws -> RakNetConnection {
         let accepted = TransportInbox<RakNetConnection>(limit: 1, byteLimit: 1)
         let commands = TransportCommands()
         TransportDriver.launch(
-            socket: socket, role: .dial(address, mtu: mtu, timeout: timeout),
+            socket: socket, role: role,
             accepted: accepted, commands: commands
         )
 

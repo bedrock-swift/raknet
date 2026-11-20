@@ -122,3 +122,27 @@ private func expectWithin<T: Sendable>(
     #expect(reply == [0xfe, 4])
     try await client.close()
 }
+
+@Test(.timeLimit(.minutes(1))) func clientResumesDetachedSessionOnTheSamePort() async throws {
+    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let listener = try RakNetListener.listen(on: endpoint)
+    defer { listener.close() }
+    let client = try await RakNetConnection.dial(listener.localAddress)
+    let incoming = try await expectWithin("accept") { try await listener.accept() }
+    let server = try #require(incoming)
+
+    try await server.sendBatch([[0xfe, 1], [0xfe, 2]])
+    let first = try await expectWithin("first server packet") { try await client.receive() }
+    #expect(first == [0xfe, 1])
+    let detached = try await client.detach()
+    let resumed = try await RakNetConnection.resume(detached)
+    #expect(resumed.localAddress == server.remoteAddress)
+    #expect(resumed.remoteAddress == listener.localAddress)
+    let buffered = try await expectWithin("buffered server packet") { try await resumed.receive() }
+    #expect(buffered == [0xfe, 2])
+
+    try await resumed.send([0xfe, 3])
+    let next = try await expectWithin("client packet after resume") { try await server.receive() }
+    #expect(next == [0xfe, 3])
+    try await resumed.close()
+}
