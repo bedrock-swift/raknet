@@ -43,12 +43,15 @@ public final class RakNetConnection: Sendable {
         try await send(payload, reliability: .reliableOrdered)
     }
 
-    public func send(_ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0) async throws {
-        try await sendBatch([payload], reliability: reliability, channel: channel)
+    public func send(
+        _ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0, priority: RakNetPriority = .immediate
+    ) async throws {
+        try await sendBatch([payload], reliability: reliability, channel: channel, priority: priority)
     }
 
     public func sendBatch(
-        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0
+        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0,
+        priority: RakNetPriority = .immediate
     ) async throws {
         try Task.checkCancellation()
         var remainingBytes = 192 * 1024 // command queue budget
@@ -59,7 +62,7 @@ public final class RakNetConnection: Sendable {
             remainingBytes -= payload.count
         }
         try await withCheckedThrowingContinuation { continuation in
-            commands.submit(.send(key, payloads, reliability, channel, continuation))
+            commands.submit(.send(key, payloads, reliability, channel, priority, continuation))
         }
     }
 
@@ -94,12 +97,12 @@ struct TransportPeerKey: Equatable, Sendable {
 
 final class TransportCommands: @unchecked Sendable {
     enum Command: Sendable {
-        case send(TransportPeerKey, [[UInt8]], RakNetReliability, UInt8, CheckedContinuation<Void, any Error>)
+        case send(TransportPeerKey, [[UInt8]], RakNetReliability, UInt8, RakNetPriority, CheckedContinuation<Void, any Error>)
         case close(TransportPeerKey, CheckedContinuation<Void, any Error>?)
 
         func complete(_ result: Result<Void, any Error>) {
             switch self {
-            case let .send(_, _, _, _, continuation):
+            case let .send(_, _, _, _, _, continuation):
                 continuation.resume(with: result)
             case let .close(_, continuation):
                 continuation?.resume(with: result)

@@ -169,3 +169,15 @@ import Testing
     #expect(try receiver.receive(last, at: 305).payloads.isEmpty)
     #expect(try receiver.receive(afterAck.replies[1], at: 306).payloads == [payloads[2], payloads[3]])
 }
+
+@Test func sessionSchedulesPriorityWithoutChangingOrderedDelivery() throws {
+    var sender = try ConnectedSession(mtu: 400)
+    var receiver = try ConnectedSession(mtu: 400)
+    #expect(try sender.sendBatch([[0xfe, 1]], priority: .low, at: 0).isEmpty)
+    #expect(try sender.sendBatch([[0xfe, 2]], priority: .high, at: 0).isEmpty)
+    let scheduled = try sender.update(at: 1)
+    try #require(scheduled.count == 2)
+    #expect(scheduled[0].suffix(2) == [0xfe, 2])
+    #expect(try receiver.receive(scheduled[0], at: 2).payloads.isEmpty)
+    #expect(try receiver.receive(scheduled[1], at: 3).payloads == [[0xfe, 1], [0xfe, 2]])
+}

@@ -56,11 +56,11 @@ Use `listener.block(_:for:)` and `listener.unblock(_:)` to control access by IP 
 
 Read `connection.roundTripTime` for the smoothed RTT once a measurement is available.
 
-Send defaults to reliable ordered delivery. Pass `reliability` and `channel` to select a different mode. Send several payloads with `try await connection.sendBatch(payloads)` to pack their frames into datagrams up to the negotiated MTU.
+Send defaults to reliable ordered delivery and immediate priority. Pass `priority` to schedule high, normal, or low priority sends. Ordered delivery is still preserved within each channel. Pass `reliability` and `channel` to select a different mode. Send several payloads with `try await connection.sendBatch(payloads)` to pack their frames into datagrams up to the negotiated MTU.
 
 Use `RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 19132))` for IPv6 loopback.
 
-The default MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OnlineConnection` exposes the protocol state machine for applications that provide their own UDP I/O.
+The default MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OnlineConnection` exposes the protocol state machine for applications that provide their own UDP I/O. Call `update(at:)` periodically to send pending acknowledgements, retries, and queued payloads.
 
 ## Development
 

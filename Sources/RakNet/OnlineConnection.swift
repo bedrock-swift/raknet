@@ -94,17 +94,19 @@ public struct OnlineConnection: Sendable {
     }
 
     public mutating func send(
-        _ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0, at milliseconds: UInt64
+        _ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0,
+        priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
         guard isOpen else { throw ConnectionError.invalidState }
-        return try session.send(payload, reliability: reliability, channel: channel, at: milliseconds)
+        return try session.send(payload, reliability: reliability, channel: channel, priority: priority, at: milliseconds)
     }
 
     public mutating func sendBatch(
-        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0, at milliseconds: UInt64
+        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0,
+        priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
         guard isOpen else { throw ConnectionError.invalidState }
-        return try session.sendBatch(payloads, reliability: reliability, channel: channel, at: milliseconds)
+        return try session.sendBatch(payloads, reliability: reliability, channel: channel, priority: priority, at: milliseconds)
     }
 
     public mutating func close(at milliseconds: UInt64) throws -> [[UInt8]] {
@@ -116,6 +118,11 @@ public struct OnlineConnection: Sendable {
 
     public mutating func flushAcknowledgements() -> [UInt8]? {
         session.flushAcknowledgements()
+    }
+
+    public mutating func update(at milliseconds: UInt64) throws -> [[UInt8]] {
+        guard !isClosed else { return [] }
+        return try session.update(at: milliseconds)
     }
 
     public mutating func retransmit(at milliseconds: UInt64) throws -> [[UInt8]] {

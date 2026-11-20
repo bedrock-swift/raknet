@@ -1,3 +1,10 @@
+public enum RakNetPriority: Int, CaseIterable, Sendable {
+    case immediate
+    case high
+    case normal
+    case low
+}
+
 public struct ConnectedSession: Sendable {
     public enum SessionError: Error, Equatable {
         case invalidMTU
@@ -16,6 +23,34 @@ public struct ConnectedSession: Sendable {
     private struct Outbound: Sendable {
         let frames: [Frame]
         let size: Int
+    }
+
+    private struct OutboundQueue: Sendable {
+        private var datagrams: [Outbound] = []
+        private var offset = 0
+
+        var first: Outbound? {
+            offset < datagrams.count ? datagrams[offset] : nil
+        }
+
+        var firstReliable: Outbound? {
+            datagrams[offset...].first { $0.frames.first?.messageIndex != nil }
+        }
+
+        mutating func append(_ new: [Outbound]) {
+            datagrams += new
+        }
+
+        mutating func dropFirst() {
+            offset += 1
+            if offset == datagrams.count {
+                datagrams.removeAll(keepingCapacity: true)
+                offset = 0
+            } else if offset >= datagrams.count - offset {
+                datagrams.removeFirst(offset)
+                offset = 0
+            }
+        }
     }
 
     private struct Pending: Sendable {
@@ -58,8 +93,7 @@ public struct ConnectedSession: Sendable {
     private var sent: [UInt32: Pending] = [:]
     private var bytesInFlight = 0
     private var congestion: CongestionWindow?
-    private var awaitingSend: [Outbound] = []
-    private var sendOffset = 0
+    private var outbound = RakNetPriority.allCases.map { _ in OutboundQueue() }
     private var queuedFrames = 0
     private var retransmissionTimer = RetransmissionTimer()
     private var incoming = SequenceWindow(size: windowSize)
@@ -99,13 +133,15 @@ public struct ConnectedSession: Sendable {
     }
 
     public mutating func send(
-        _ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0, at milliseconds: UInt64
+        _ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0,
+        priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
-        try sendBatch([payload], reliability: reliability, channel: channel, at: milliseconds)
+        try sendBatch([payload], reliability: reliability, channel: channel, priority: priority, at: milliseconds)
     }
 
     public mutating func sendBatch(
-        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0, at milliseconds: UInt64
+        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0,
+        priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
         guard channel < 32, reliability.hasOrder || channel == 0 else { throw SessionError.invalidOrderingChannel }
         var frameLimit = datagramLimit - SessionDatagram.frameHeaderSize - 3 // frame header
@@ -113,18 +149,20 @@ public struct ConnectedSession: Sendable {
         if reliability.hasSequenceIndex { frameLimit -= 3 }
         if reliability.hasOrder { frameLimit -= 4 }
 
-        var reliableFrames = 0
+        let enqueue = priority != .immediate || (congestion != nil && reliability.hasMessageIndex)
+        var frameCount = 0
         let chunkSizes = try payloads.map { payload in
             let chunkSize = payload.count > frameLimit ? frameLimit - 10 : frameLimit // split header
             let limit = reliability.hasMessageIndex ? Self.fragmentLimit * chunkSize : frameLimit
             guard !payload.isEmpty, payload.count <= limit else { throw SessionError.invalidPayloadSize }
-            if reliability.hasMessageIndex {
-                reliableFrames += (payload.count + chunkSize - 1) / chunkSize
-                guard reliableFrames <= Self.windowSize else { throw SessionError.sendWindowFull }
+            if reliability.hasMessageIndex || enqueue {
+                frameCount += (payload.count + chunkSize - 1) / chunkSize
+                guard frameCount <= Self.windowSize else { throw SessionError.sendWindowFull }
             }
             return chunkSize
         }
-        if reliableFrames > 0, !canSend(reliableFrames) { throw SessionError.sendWindowFull }
+        if enqueue, queuedFrames + frameCount > Self.windowSize { throw SessionError.sendWindowFull }
+        if reliability.hasMessageIndex, frameCount > 0, !canSend(frameCount) { throw SessionError.sendWindowFull }
 
         var prepared: [Outbound] = []
         var frames: [Frame] = []
@@ -142,12 +180,10 @@ public struct ConnectedSession: Sendable {
             }
         }
         if !frames.isEmpty { prepared.append(Outbound(frames: frames, size: size)) }
-        guard congestion != nil, reliability.hasMessageIndex else {
-            return prepared.map { emit($0, at: milliseconds, retries: 0) }
-        }
-        awaitingSend += prepared
-        queuedFrames += reliableFrames
-        return flushOutbound(at: milliseconds)
+        guard enqueue else { return prepared.map { emit($0, at: milliseconds, retries: 0) } }
+        outbound[priority.rawValue].append(prepared)
+        queuedFrames += frameCount
+        return priority == .immediate ? flushOutbound(at: milliseconds) : []
     }
 
     private mutating func makeFrames(
@@ -182,7 +218,10 @@ public struct ConnectedSession: Sendable {
     private func canSend(_ count: Int) -> Bool {
         let inFlight = sent.values.reduce(0) { $0 + $1.datagram.frames.count }
         guard inFlight + queuedFrames + count <= Self.windowSize else { return false }
-        if queuedFrames > 0, !fitsWindow(awaitingSend[sendOffset], adding: count) { return false }
+        guard outbound.allSatisfy({ queue in
+            guard let first = queue.firstReliable else { return true }
+            return fitsWindow(first, adding: count)
+        }) else { return false }
         return sent.values.allSatisfy { fitsWindow($0.datagram, adding: count) }
     }
 
@@ -238,6 +277,12 @@ public struct ConnectedSession: Sendable {
         return packet
     }
 
+    public mutating func update(at milliseconds: UInt64) throws -> [[UInt8]] {
+        let acknowledgement = flushAcknowledgements()
+        let outbound = try retransmit(at: milliseconds)
+        return acknowledgement.map { [$0] + outbound } ?? outbound
+    }
+
     public mutating func retransmit(at milliseconds: UInt64) throws -> [[UInt8]] {
         let expired = sent.compactMap { sequence, packet in
             let delay = retransmissionTimer.delay(after: packet.retries)
@@ -276,21 +321,17 @@ public struct ConnectedSession: Sendable {
     }
 
     private mutating func flushOutbound(at time: UInt64) -> [[UInt8]] {
-        guard let congestion, queuedFrames > 0 else { return [] }
+        guard queuedFrames > 0 else { return [] }
+        var available = congestion.map { $0.bytes - bytesInFlight } ?? Int.max
         var replies: [[UInt8]] = []
-        while sendOffset < awaitingSend.count {
-            let datagram = awaitingSend[sendOffset]
-            guard datagram.size <= congestion.bytes - bytesInFlight else { break }
-            replies.append(emit(datagram, at: time, retries: 0))
-            queuedFrames -= datagram.frames.count
-            sendOffset += 1
-        }
-        if sendOffset == awaitingSend.count {
-            awaitingSend.removeAll(keepingCapacity: true)
-            sendOffset = 0
-        } else if sendOffset >= awaitingSend.count - sendOffset {
-            awaitingSend.removeFirst(sendOffset)
-            sendOffset = 0
+        for priority in outbound.indices {
+            while let datagram = outbound[priority].first {
+                guard datagram.size <= available else { return replies }
+                replies.append(emit(datagram, at: time, retries: 0))
+                queuedFrames -= datagram.frames.count
+                available -= datagram.size
+                outbound[priority].dropFirst()
+            }
         }
         return replies
     }
