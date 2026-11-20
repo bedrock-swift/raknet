@@ -354,11 +354,11 @@ struct TransportDriver {
     private mutating func perform(_ command: TransportCommands.Command, at now: UInt64) {
         do {
             switch command {
-            case let .send(key, payload, reliability, channel, _):
+            case let .send(key, payloads, reliability, channel, _):
                 guard let peer = peers[key.address], peer.key == key, peer.connection.isOpen else {
                     throw RakNetTransportError.closed
                 }
-                let packets = try peer.connection.send(payload, reliability: reliability, channel: channel, at: now)
+                let packets = try peer.connection.sendBatch(payloads, reliability: reliability, channel: channel, at: now)
                 try send(packets, to: key.address)
             case let .close(key, _):
                 if let peer = peers[key.address], peer.key == key, peer.connection.isOpen {

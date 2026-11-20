@@ -44,12 +44,22 @@ public final class RakNetConnection: Sendable {
     }
 
     public func send(_ payload: [UInt8], reliability: RakNetReliability, channel: UInt8 = 0) async throws {
+        try await sendBatch([payload], reliability: reliability, channel: channel)
+    }
+
+    public func sendBatch(
+        _ payloads: [[UInt8]], reliability: RakNetReliability = .reliableOrdered, channel: UInt8 = 0
+    ) async throws {
         try Task.checkCancellation()
-        guard !payload.isEmpty, payload.count <= 192 * 1024 else {
-            throw ConnectedSession.SessionError.invalidPayloadSize
+        var remainingBytes = 192 * 1024 // command queue budget
+        for payload in payloads {
+            guard !payload.isEmpty, payload.count <= remainingBytes else {
+                throw ConnectedSession.SessionError.invalidPayloadSize
+            }
+            remainingBytes -= payload.count
         }
         try await withCheckedThrowingContinuation { continuation in
-            commands.submit(.send(key, payload, reliability, channel, continuation))
+            commands.submit(.send(key, payloads, reliability, channel, continuation))
         }
     }
 
@@ -84,7 +94,7 @@ struct TransportPeerKey: Equatable, Sendable {
 
 final class TransportCommands: @unchecked Sendable {
     enum Command: Sendable {
-        case send(TransportPeerKey, [UInt8], RakNetReliability, UInt8, CheckedContinuation<Void, any Error>)
+        case send(TransportPeerKey, [[UInt8]], RakNetReliability, UInt8, CheckedContinuation<Void, any Error>)
         case close(TransportPeerKey, CheckedContinuation<Void, any Error>?)
 
         func complete(_ result: Result<Void, any Error>) {

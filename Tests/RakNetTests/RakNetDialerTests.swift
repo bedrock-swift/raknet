@@ -35,6 +35,12 @@ func dialExchangesPayloadAndCloses(useIPv6: Bool) async throws {
     }
     #expect(latency != nil)
 
+    try await client.sendBatch([[0xfe, 1], [0xfe, 2]])
+    let first = try await expectWithin("first batch packet") { try await server.receive() }
+    let second = try await expectWithin("second batch packet") { try await server.receive() }
+    #expect(first == [0xfe, 1])
+    #expect(second == [0xfe, 2])
+
     try await client.close()
     let afterClose = try await expectWithin("close") { try await server.receive() }
     #expect(afterClose == nil)
