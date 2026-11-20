@@ -186,3 +186,25 @@ private func simulateClient(
     let received = server.receive(packet, from: address, at: 201)
     #expect(received.events == [.payload(address, [0xfe, 42])])
 }
+
+@Test func anOpenSessionSurvivesAReconnectWithoutCookies() throws {
+    let endpoint = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 19132))
+    let address = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50001))
+    let offline = try OfflineServer(guid: 42, advertisement: [])
+    var server = try RakNetServer(on: endpoint, server: offline, useCookies: false)
+    var original = try simulateClient(address, connectingTo: endpoint, server: &server, at: 0)
+
+    var reconnect = OfflineClient(server: endpoint)
+    let challenge = server.receive(try reconnect.probe(), from: address, at: 100)
+    let reply = try #require(challenge.datagrams.first)
+    guard case let .send(request) = try reconnect.receive(reply.bytes, from: endpoint) else {
+        throw OnlineConnection.ConnectionError.invalidState
+    }
+    let ignored = server.receive(request, from: address, at: 101)
+    #expect(ignored.datagrams.isEmpty)
+    #expect(ignored.events.isEmpty)
+
+    let packets = try original.send([0xfe, 42], at: 102)
+    let packet = try #require(packets.first)
+    #expect(server.receive(packet, from: address, at: 103).events == [.payload(address, [0xfe, 42])])
+}
