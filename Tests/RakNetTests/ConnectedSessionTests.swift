@@ -61,3 +61,26 @@ import Testing
     #expect(duplicate.payloads.isEmpty)
     #expect(duplicate.replies == [[0xc0, 0, 1, 1, 1, 0, 0]])
 }
+
+@Test func sessionLearnsRetransmissionDelayFromAcknowledgements() throws {
+    var sender = try ConnectedSession(mtu: 1440)
+    _ = try sender.send([0xfe], at: 0)
+    _ = try sender.receive([0xc0, 0, 1, 1, 0, 0, 0], at: 200)
+    _ = try sender.send([0xfe], at: 200)
+
+    #expect(try sender.retransmit(at: 799).isEmpty)
+    #expect(try sender.retransmit(at: 800).count == 1)
+    #expect(try sender.retransmit(at: 1999).isEmpty)
+    #expect(try sender.retransmit(at: 2000).count == 1)
+}
+
+@Test func sessionIgnoresRTTFromRetransmittedPackets() throws {
+    var sender = try ConnectedSession(mtu: 1440)
+    _ = try sender.send([0xfe], at: 0)
+    #expect(try sender.retransmit(at: 300).count == 1)
+    _ = try sender.receive([0xc0, 0, 1, 1, 1, 0, 0], at: 301)
+
+    _ = try sender.send([0xfe], at: 301)
+    #expect(try sender.retransmit(at: 600).isEmpty)
+    #expect(try sender.retransmit(at: 601).count == 1)
+}

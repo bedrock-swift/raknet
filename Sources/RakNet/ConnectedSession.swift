@@ -49,6 +49,7 @@ public struct ConnectedSession: Sendable {
     private var nextSequence = [UInt32](repeating: 0, count: 32)
     private var nextFragment: UInt16 = 0
     private var sent: [UInt32: Pending] = [:]
+    private var retransmissionTimer = RetransmissionTimer()
     private var incoming = SequenceWindow(size: windowSize)
     private var reliable = SequenceWindow(size: windowSize)
     private var expectedOrder = [UInt32](repeating: 0, count: 32)
@@ -130,7 +131,14 @@ public struct ConnectedSession: Sendable {
 
         switch packet {
         case let .acknowledgement(sequences):
-            for sequence in sequences { sent.removeValue(forKey: sequence) }
+            var sample: UInt64?
+            for sequence in sequences {
+                guard let packet = sent.removeValue(forKey: sequence), packet.retries == 0,
+                      milliseconds >= packet.sentAt else { continue }
+                let elapsed = milliseconds - packet.sentAt
+                sample = min(sample ?? elapsed, elapsed) // one sample per acknowledgement
+            }
+            if let sample { retransmissionTimer.observe(sample) }
             return Input()
         case let .negativeAcknowledgement(sequences):
             return Input(replies: try resend(sequences, at: milliseconds))
@@ -151,7 +159,8 @@ public struct ConnectedSession: Sendable {
 
     public mutating func retransmit(at milliseconds: UInt64) throws -> [[UInt8]] {
         let expired = sent.compactMap { sequence, packet in
-            milliseconds >= packet.sentAt && milliseconds - packet.sentAt >= 300 ? sequence : nil
+            let delay = retransmissionTimer.delay(after: packet.retries)
+            return milliseconds >= packet.sentAt && milliseconds - packet.sentAt >= delay ? sequence : nil
         }
         return try resend(expired, at: milliseconds)
     }
