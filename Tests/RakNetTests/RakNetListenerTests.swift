@@ -91,3 +91,15 @@ import Testing
     let next = try await RakNetConnection.dial(listener.localAddress)
     try await next.close()
 }
+
+@Test func onlineRateRefillsAndTemporarilyBlocksOverruns() {
+    var rate = OnlinePacketRate(packetsPerSecond: 2, at: 0)
+    let attempts: [(UInt64, Bool)] = [
+        (0, true), (0, true), (500, true), (501, false),
+        (10_500, false), (10_501, true), (10_501, true), (10_501, false)
+    ]
+    for (now, expected) in attempts {
+        let allowed = rate.allow(at: now)
+        #expect(allowed == expected)
+    }
+}

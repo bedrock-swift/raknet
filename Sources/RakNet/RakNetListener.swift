@@ -21,7 +21,8 @@ public final class RakNetListener: Sendable {
 
     private init(
         socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16,
-        maximumConnections: Int, maximumConnectionsPerIP: Int?, useCookies: Bool, offlinePacketLimits: OfflinePacketLimits?
+        maximumConnections: Int, maximumConnectionsPerIP: Int?, useCookies: Bool,
+        offlinePacketLimits: OfflinePacketLimits?, onlinePacketsPerSecond: UInt32?
     ) {
         localAddress = socket.localAddress
         let accepted = TransportInbox<RakNetConnection>(limit: maximumConnections, byteLimit: maximumConnections)
@@ -38,7 +39,7 @@ public final class RakNetListener: Sendable {
             role: .listen(.init(
                 server: server, advertisement: advertisement, access: access,
                 maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
-                useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
+                useCookies: useCookies, offlinePacketLimits: offlinePacketLimits, onlinePacketsPerSecond: onlinePacketsPerSecond
             )),
             accepted: accepted, commands: commands
         )
@@ -52,12 +53,13 @@ public final class RakNetListener: Sendable {
         maximumConnections: Int = 128,
         maximumConnectionsPerIP: Int? = nil,
         useCookies: Bool = true,
-        offlinePacketLimits: OfflinePacketLimits? = .init()
+        offlinePacketLimits: OfflinePacketLimits? = .init(),
+        onlinePacketsPerSecond: UInt32? = 10_000
     ) throws -> RakNetListener {
         try listen(
             on: .ipv4(address), guid: guid, advertisement: advertisement, maximumMTU: maximumMTU,
             maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
-            useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
+            useCookies: useCookies, offlinePacketLimits: offlinePacketLimits, onlinePacketsPerSecond: onlinePacketsPerSecond
         )
     }
 
@@ -69,7 +71,8 @@ public final class RakNetListener: Sendable {
         maximumConnections: Int = 128,
         maximumConnectionsPerIP: Int? = nil,
         useCookies: Bool = true,
-        offlinePacketLimits: OfflinePacketLimits? = .init()
+        offlinePacketLimits: OfflinePacketLimits? = .init(),
+        onlinePacketsPerSecond: UInt32? = 10_000
     ) throws -> RakNetListener {
         guard (1...4096).contains(maximumConnections),
               maximumConnectionsPerIP.map({ (1...4096).contains($0) }) ?? true else {
@@ -82,7 +85,7 @@ public final class RakNetListener: Sendable {
         return RakNetListener(
             socket: socket, server: server, maximumMTU: maximumMTU,
             maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
-            useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
+            useCookies: useCookies, offlinePacketLimits: offlinePacketLimits, onlinePacketsPerSecond: onlinePacketsPerSecond
         )
     }
 
@@ -155,6 +158,7 @@ struct TransportDriver {
         let maximumConnectionsPerIP: Int?
         let useCookies: Bool
         let offlinePacketLimits: RakNetListener.OfflinePacketLimits?
+        let onlinePacketsPerSecond: UInt32?
     }
 
     enum Role: Sendable {
@@ -179,13 +183,18 @@ struct TransportDriver {
         var connection: OnlineConnection
         var lastPacket: UInt64
         var nextPing: UInt64
+        var onlineRate: OnlinePacketRate?
 
-        init(key: TransportPeerKey, mtu: UInt16, connection: OnlineConnection, now: UInt64) {
+        init(
+            key: TransportPeerKey, mtu: UInt16, connection: OnlineConnection, now: UInt64,
+            onlinePacketsPerSecond: UInt32? = nil
+        ) {
             self.key = key
             self.mtu = mtu
             self.connection = connection
             lastPacket = now
             nextPing = now + 2_000
+            onlineRate = onlinePacketsPerSecond.map { OnlinePacketRate(packetsPerSecond: $0, at: now) }
         }
     }
 
@@ -261,7 +270,7 @@ struct TransportDriver {
             try receiveDialReply(datagram, from: address, at: now)
             return
         }
-        guard header & 0x80 != 0 else { return }
+        guard header & 0x80 != 0, peer.onlineRate?.allow(at: now) != false else { return }
         do {
             let input = try peer.connection.receive(datagram, from: address, at: now)
             try send(input.replies, to: address)
@@ -356,7 +365,10 @@ struct TransportDriver {
                 let connection = try OnlineConnection(
                     accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
                 )
-                peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
+                peers[address] = Peer(
+                    key: key, mtu: negotiation.mtu, connection: connection, now: now,
+                    onlinePacketsPerSecond: listener.onlinePacketsPerSecond
+                )
                 if listener.maximumConnectionsPerIP != nil { connectionsByHost[host, default: 0] += 1 }
             }
             try socket.send(response.datagram, to: address)

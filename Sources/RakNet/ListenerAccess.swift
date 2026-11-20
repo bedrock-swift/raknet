@@ -68,3 +68,31 @@ struct OfflinePacketRate {
         return true
     }
 }
+
+struct OnlinePacketRate {
+    private let packetsPerSecond: UInt64
+    private let capacity: UInt64
+    private var credit: UInt64
+    private var updatedAt: UInt64
+    private var blockedUntil: UInt64 = 0
+
+    init(packetsPerSecond: UInt32, at now: UInt64) {
+        self.packetsPerSecond = UInt64(packetsPerSecond)
+        capacity = UInt64(packetsPerSecond) * 1_000
+        credit = capacity
+        updatedAt = now
+    }
+
+    mutating func allow(at now: UInt64) -> Bool {
+        guard now >= blockedUntil else { return false }
+        let elapsed = min(now - updatedAt, 1_000)
+        credit = min(capacity, credit + elapsed * packetsPerSecond)
+        updatedAt = now
+        guard credit >= 1_000 else {
+            blockedUntil = now + 10_000
+            return false
+        }
+        credit -= 1_000
+        return true
+    }
+}
