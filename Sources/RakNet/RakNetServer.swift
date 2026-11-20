@@ -22,6 +22,7 @@ public struct RakNetServer: Sendable {
         var lastPacket: UInt64
         var nextPing: UInt64
         var onlineRate: OnlinePacketRate?
+        let cookieContext: OfflineCookieContext
     }
 
     public let localAddress: RakNetEndpoint
@@ -173,31 +174,46 @@ public struct RakNetServer: Sendable {
     }
 
     private mutating func receiveOffline(_ datagram: [UInt8], from address: RakNetEndpoint, at time: UInt64) -> Output {
-        guard let response = handshake.receive(datagram, from: address, at: time) else { return Output() }
+        let existing = peers[address]
+        let namespace = existing?.cookieContext.namespace(established: existing?.established == true)
+        guard let response = handshake.receive(datagram, from: address, at: time, namespace: namespace, advertisement: nil) else {
+            return Output()
+        }
+        var events: [Event] = []
         if let negotiation = response.negotiation {
-            if let existing = peers[address] {
+            if let existing, !existing.established {
                 guard existing.mtu == negotiation.mtu,
                       existing.connection.acceptsHandshakeRetry(clientGUID: negotiation.clientGUID) else { return Output() }
             } else {
+                guard existing == nil || handshake.useCookies else { return Output() }
                 do {
                     let connection = try OnlineConnection(
                         accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
                     )
-                    try install(connection, mtu: negotiation.mtu, at: time)
+                    try install(connection, mtu: negotiation.mtu, at: time, openingNamespace: namespace)
+                    if existing != nil { events.append(.disconnected(address)) }
                 } catch {
                     return Output()
                 }
             }
         }
-        return Output(datagrams: [Datagram(destination: address, bytes: response.datagram)])
+        return Output(datagrams: [Datagram(destination: address, bytes: response.datagram)], events: events)
     }
 
-    private mutating func install(_ connection: OnlineConnection, mtu: UInt16, at time: UInt64) throws {
-        try quota.reserve(connection.peer, established: connection.isOpen)
-        peers[connection.peer] = Peer(
-            mtu: mtu, connection: connection, established: connection.isOpen, lastPacket: time, nextPing: time + min(2_000, UInt64.max - time),
-            onlineRate: onlinePacketsPerSecond.map { OnlinePacketRate(packetsPerSecond: $0, at: time) }
+    private mutating func install(
+        _ connection: OnlineConnection, mtu: UInt16, at time: UInt64, openingNamespace: UInt64? = nil
+    ) throws {
+        try quota.reserve(
+            connection.peer, established: connection.isOpen, replacingEstablished: openingNamespace != nil
         )
+        let peer = Peer(
+            mtu: mtu, connection: connection, established: connection.isOpen, lastPacket: time, nextPing: time + min(2_000, UInt64.max - time),
+            onlineRate: onlinePacketsPerSecond.map { OnlinePacketRate(packetsPerSecond: $0, at: time) },
+            cookieContext: OfflineCookieContext(opening: openingNamespace)
+        )
+        if let previous = peers.updateValue(peer, forKey: connection.peer) {
+            quota.release(connection.peer, established: previous.established)
+        }
     }
 
     private static func datagrams(_ packets: [[UInt8]], to destination: RakNetEndpoint) -> [Datagram] {

@@ -162,3 +162,37 @@ private func expectWithin<T: Sendable>(
         try await RakNetConnection.dial(listener.localAddress, protocolVersion: 9)
     }
 }
+
+@Test(.timeLimit(.minutes(1))) func listenerAcceptsReconnectFromTheSameLocalPort() async throws {
+    let address = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let listener = try RakNetListener.listen(on: address, maximumConnections: 1)
+    defer { listener.close() }
+    let remote = listener.localAddress
+
+    func dial(from local: RakNetEndpoint) async throws -> RakNetConnection {
+        let socket = try UDPSocket(bindTo: local, receiveTimeout: 20)
+        let accepted = TransportInbox<RakNetConnection>(limit: 1, byteLimit: 1)
+        let commands = TransportCommands()
+        TransportDriver.launch(
+            socket: socket, role: .dial(remote, mtu: RakNetMTU.defaultValue, timeout: .seconds(3), protocolVersion: 11),
+            accepted: accepted, commands: commands
+        )
+        return try #require(try await accepted.next())
+    }
+
+    let first = try await dial(from: .ipv4(address))
+    let original = try await expectWithin("first connection") { try await listener.accept() }
+    let old = try #require(original)
+    let detached = try await first.detach()
+
+    let second = try await dial(from: detached.localAddress)
+    let incoming = try await expectWithin("replacement connection") { try await listener.accept() }
+    let replacement = try #require(incoming)
+    #expect(replacement.remoteAddress == old.remoteAddress)
+    let ended = try await expectWithin("closed original connection") { try await old.receive() }
+    #expect(ended == nil)
+    try await second.send([0xfe, 42])
+    let payload = try await expectWithin("replacement payload") { try await replacement.receive() }
+    #expect(payload == [0xfe, 42])
+    try await second.close()
+}

@@ -31,7 +31,8 @@ import Testing
 }
 
 private func simulateClient(
-    _ address: RakNetEndpoint, connectingTo endpoint: RakNetEndpoint, server: inout RakNetServer, at time: UInt64
+    _ address: RakNetEndpoint, connectingTo endpoint: RakNetEndpoint, server: inout RakNetServer, at time: UInt64,
+    replacing: Bool = false
 ) throws -> OnlineConnection {
     var offline = OfflineClient(server: endpoint, guid: -Int64(address.port))
     let probe = try offline.probe()
@@ -42,7 +43,9 @@ private func simulateClient(
     }
     let offer = server.receive(request, from: address, at: time + 1)
     let retry = server.receive(request, from: address, at: time + 1)
-    #expect(retry == offer)
+    #expect(retry.datagrams == offer.datagrams)
+    #expect(retry.events.isEmpty)
+    #expect(offer.events == (replacing ? [.disconnected(address)] : []))
     let second = try #require(offer.datagrams.first)
     guard case let .negotiated(negotiation) = try offline.receive(second.bytes, from: endpoint) else {
         throw OnlineConnection.ConnectionError.invalidState
@@ -167,4 +170,19 @@ private func simulateClient(
     let link = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0xfe80_0000_0000_0000, addressLow: 1, port: 2000, scopeID: 1))
     let otherLink = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0xfe80_0000_0000_0000, addressLow: 1, port: 2000, scopeID: 2))
     #expect(ListenerHost(link) != ListenerHost(otherLink))
+}
+
+@Test func serverReplacesAnOpenSessionAfterAFreshCookieExchange() throws {
+    let endpoint = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 19132))
+    let address = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50001))
+    let offline = try OfflineServer(guid: 42, advertisement: [])
+    var server = try RakNetServer(on: endpoint, server: offline, maximumConnections: 1)
+    let first = try simulateClient(address, connectingTo: endpoint, server: &server, at: 0)
+    #expect(first.isOpen)
+
+    var second = try simulateClient(address, connectingTo: endpoint, server: &server, at: 100, replacing: true)
+    let packets = try second.send([0xfe, 42], at: 200)
+    let packet = try #require(packets.first)
+    let received = server.receive(packet, from: address, at: 201)
+    #expect(received.events == [.payload(address, [0xfe, 42])])
 }

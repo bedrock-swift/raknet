@@ -1,3 +1,12 @@
+struct OfflineCookieContext: Sendable {
+    let opening: UInt64?
+    private let active = UInt64.random(in: .min ... .max) // scope for the next handshake
+
+    init(opening: UInt64?) { self.opening = opening }
+
+    func namespace(established: Bool) -> UInt64? { established ? active : opening }
+}
+
 struct OfflineCookies: Sendable {
     private static let window: UInt64 = 5_000
     private let key0: UInt64
@@ -8,19 +17,20 @@ struct OfflineCookies: Sendable {
         self.key1 = key1
     }
 
-    func issue(to endpoint: RakNetEndpoint, at time: UInt64) -> UInt32 {
-        cookie(to: endpoint, window: time / Self.window)
+    func issue(to endpoint: RakNetEndpoint, at time: UInt64, namespace: UInt64? = nil) -> UInt32 {
+        cookie(to: endpoint, window: time / Self.window, namespace: namespace)
     }
 
-    func accepts(_ value: UInt32, from endpoint: RakNetEndpoint, at time: UInt64) -> Bool {
+    func accepts(_ value: UInt32, from endpoint: RakNetEndpoint, at time: UInt64, namespace: UInt64? = nil) -> Bool {
         let window = time / Self.window
-        let current = cookie(to: endpoint, window: window)
-        let previous = window == 0 ? current : cookie(to: endpoint, window: window - 1)
+        let current = cookie(to: endpoint, window: window, namespace: namespace)
+        let previous = window == 0 ? current : cookie(to: endpoint, window: window - 1, namespace: namespace)
         return value == current || value == previous
     }
 
-    private func cookie(to endpoint: RakNetEndpoint, window: UInt64) -> UInt32 {
-        let input = bigEndianBytes(window) + endpoint.socketPeer.wireBytes
+    private func cookie(to endpoint: RakNetEndpoint, window: UInt64, namespace: UInt64?) -> UInt32 {
+        var input = bigEndianBytes(window) + endpoint.socketPeer.wireBytes
+        if let namespace { input += bigEndianBytes(namespace) }
         return UInt32(truncatingIfNeeded: Self.tag(input, key0: key0, key1: key1))
     }
 

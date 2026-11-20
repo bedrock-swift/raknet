@@ -196,14 +196,16 @@ struct TransportDriver {
         var lastPacket: UInt64
         var nextPing: UInt64
         var onlineRate: OnlinePacketRate?
+        let cookieContext: OfflineCookieContext
 
         init(
             key: TransportPeerKey, mtu: UInt16, connection: OnlineConnection, now: UInt64,
-            onlinePacketsPerSecond: UInt32? = nil
+            onlinePacketsPerSecond: UInt32? = nil, openingNamespace: UInt64? = nil
         ) {
             self.key = key
             self.mtu = mtu
             self.connection = connection
+            cookieContext = OfflineCookieContext(opening: openingNamespace)
             established = connection.isOpen
             lastPacket = now
             nextPing = now + 2_000
@@ -298,10 +300,12 @@ struct TransportDriver {
             guard !listener.access.isBlocked(address) else { return }
             if header & 0x80 == 0 {
                 guard offlineRate?.allow(address, at: now) != false else { return }
-                if let response = handshake?.receive(datagram, from: address, at: now, advertisement: {
+                let peer = peers[address]
+                let namespace = peer?.cookieContext.namespace(established: peer?.established == true)
+                if let response = handshake?.receive(datagram, from: address, at: now, namespace: namespace, advertisement: {
                     listener.advertisement.data(for: address)
                 }) {
-                    handleOffline(response, from: address, at: now, listener: listener)
+                    handleOffline(response, from: address, namespace: namespace, at: now, listener: listener)
                 }
                 return
             }
@@ -378,20 +382,25 @@ struct TransportDriver {
     }
 
     private mutating func handleOffline(
-        _ response: OfflineServer.Response, from address: RakNetEndpoint, at now: UInt64, listener: Listener
+        _ response: OfflineServer.Response, from address: RakNetEndpoint, namespace: UInt64?, at now: UInt64,
+        listener: Listener
     ) {
-        do {
-            if let negotiation = response.negotiation {
-                if let existing = peers[address] {
-                    guard existing.mtu == negotiation.mtu,
-                          existing.connection.acceptsHandshakeRetry(clientGUID: negotiation.clientGUID) else { return }
-                } else {
-                    let connection = try OnlineConnection(
+        if let negotiation = response.negotiation {
+            let existing = peers[address]
+            if let existing, !existing.established {
+                guard existing.mtu == negotiation.mtu,
+                      existing.connection.acceptsHandshakeRetry(clientGUID: negotiation.clientGUID) else { return }
+            } else {
+                guard existing == nil || listener.useCookies,
+                      let connection = try? OnlineConnection(
                         accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
-                    )
-                    _ = try register(connection, mtu: negotiation.mtu, listener: listener, at: now)
-                }
+                      ),
+                      (try? register(
+                        connection, mtu: negotiation.mtu, listener: listener, at: now, openingNamespace: namespace
+                      )) != nil else { return }
             }
+        }
+        do {
             try socket.send(response.datagram, to: address)
         } catch {
             remove(address, failure: error)
@@ -399,17 +408,23 @@ struct TransportDriver {
     }
 
     private mutating func register(
-        _ connection: OnlineConnection, mtu: UInt16, listener: Listener, at now: UInt64
+        _ connection: OnlineConnection, mtu: UInt16, listener: Listener, at now: UInt64,
+        openingNamespace: UInt64? = nil
     ) throws -> Peer {
         let address = connection.peer
-        guard peers[address] == nil else { throw RakNetTransportError.connectionAlreadyExists }
-        try quota?.reserve(address, established: connection.isOpen)
+        guard peers[address] == nil || (openingNamespace != nil && peers[address]?.established == true) else {
+            throw RakNetTransportError.connectionAlreadyExists
+        }
+        try quota?.reserve(
+            connection.peer, established: connection.isOpen, replacingEstablished: openingNamespace != nil
+        )
+        if openingNamespace != nil { remove(address) }
 
         let key = TransportPeerKey(address: address, generation: generation)
         generation &+= 1 // reused udp endpoints
         let peer = Peer(
             key: key, mtu: mtu, connection: connection, now: now,
-            onlinePacketsPerSecond: listener.onlinePacketsPerSecond
+            onlinePacketsPerSecond: listener.onlinePacketsPerSecond, openingNamespace: openingNamespace
         )
         peer.metrics.update(from: connection)
         peers[address] = peer

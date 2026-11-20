@@ -166,11 +166,13 @@ struct ConnectionAdmission: Sendable {
         self.pending = try ConnectionQuota(maximum: pending.total, perIP: pending.perIP)
     }
 
-    mutating func reserve(_ endpoint: RakNetEndpoint, established: Bool) throws {
+    mutating func reserve(_ endpoint: RakNetEndpoint, established: Bool, replacingEstablished: Bool = false) throws {
         if established {
             try live.reserve(endpoint)
         } else {
-            guard live.hasCapacity(for: endpoint) else { throw RakNetTransportError.connectionLimitReached }
+            guard replacingEstablished || live.hasCapacity(for: endpoint) else {
+                throw RakNetTransportError.connectionLimitReached
+            }
             try pending.reserve(endpoint)
         }
     }
