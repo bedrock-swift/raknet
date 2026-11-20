@@ -119,3 +119,18 @@ private func simulateClient(
     let connected = try simulateClient(otherHost, connectingTo: endpoint, server: &server, at: 4)
     #expect(connected.isOpen)
 }
+
+@Test func serverProbesOnlyAfterAQuietPeriod() throws {
+    let endpoint = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 19132))
+    let remote = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50001))
+    let offline = try OfflineServer(guid: 42, advertisement: [])
+    var server = try RakNetServer(on: endpoint, server: offline)
+    var client = try simulateClient(remote, connectingTo: endpoint, server: &server, at: 0)
+    let packets = try client.send([0xfe], at: 2_100)
+    let packet = try #require(packets.first)
+    _ = server.receive(packet, from: remote, at: 2_100)
+    let active = server.update(at: 2_101)
+    #expect(!active.datagrams.contains { $0.bytes.count == 16 && $0.bytes[7] == 0 })
+    let idle = server.update(at: 4_100)
+    #expect(idle.datagrams.contains { $0.bytes.count == 16 && $0.bytes[7] == 0 })
+}

@@ -115,13 +115,17 @@ public struct RakNetServer: Sendable {
 
             do {
                 output.datagrams += Self.datagrams(try peer.connection.update(at: time), to: address)
-                if time >= peer.nextPing, let ping = peer.connection.keepalive(at: time) {
+                if time >= peer.nextPing, time >= peer.lastPacket, time - peer.lastPacket >= 2_000,
+                   let ping = peer.connection.keepalive(at: time) {
                     output.datagrams.append(Datagram(destination: address, bytes: ping))
                     peer.nextPing = time + min(2_000, UInt64.max - time)
                 }
                 peers[address] = peer
             } catch {
                 quota.release(address, established: peer.established)
+                if let packet = peer.connection.abort() {
+                    output.datagrams.append(Datagram(destination: address, bytes: packet))
+                }
                 output.events.append(.disconnected(address))
             }
         }

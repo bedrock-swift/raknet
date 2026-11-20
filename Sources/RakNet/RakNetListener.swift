@@ -485,11 +485,13 @@ struct TransportDriver {
                 let packets = try peer.connection.update(at: now)
                 if !packets.isEmpty { peer.metrics.update(from: peer.connection) }
                 try send(packets, to: address)
-                if now >= peer.nextPing, let ping = peer.connection.keepalive(at: now) { // idle peer probe
+                if now >= peer.nextPing, now - peer.lastPacket >= 2_000,
+                   let ping = peer.connection.keepalive(at: now) { // idle peer probe
                     try socket.send(ping, to: address)
                     peer.nextPing = now + 2_000
                 }
             } catch {
+                if let packet = peer.connection.abort() { try? socket.send(packet, to: address) }
                 remove(address, failure: error)
             }
         }
