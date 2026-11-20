@@ -20,8 +20,8 @@ public final class RakNetListener: Sendable {
     private let access = ListenerAccess()
 
     private init(
-        socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16, maximumConnections: Int, useCookies: Bool,
-        offlinePacketLimits: OfflinePacketLimits?
+        socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16,
+        maximumConnections: Int, maximumConnectionsPerIP: Int?, useCookies: Bool, offlinePacketLimits: OfflinePacketLimits?
     ) {
         localAddress = socket.localAddress
         let accepted = TransportInbox<RakNetConnection>(limit: maximumConnections, byteLimit: maximumConnections)
@@ -37,7 +37,8 @@ public final class RakNetListener: Sendable {
             socket: socket,
             role: .listen(.init(
                 server: server, advertisement: advertisement, access: access,
-                maximumConnections: maximumConnections, useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
+                maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
+                useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
             )),
             accepted: accepted, commands: commands
         )
@@ -49,12 +50,14 @@ public final class RakNetListener: Sendable {
         advertisement: [UInt8] = [],
         maximumMTU: UInt16 = RakNetMTU.defaultValue,
         maximumConnections: Int = 128,
+        maximumConnectionsPerIP: Int? = nil,
         useCookies: Bool = true,
         offlinePacketLimits: OfflinePacketLimits? = .init()
     ) throws -> RakNetListener {
         try listen(
             on: .ipv4(address), guid: guid, advertisement: advertisement, maximumMTU: maximumMTU,
-            maximumConnections: maximumConnections, useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
+            maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
+            useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
         )
     }
 
@@ -64,17 +67,22 @@ public final class RakNetListener: Sendable {
         advertisement: [UInt8] = [],
         maximumMTU: UInt16 = RakNetMTU.defaultValue,
         maximumConnections: Int = 128,
+        maximumConnectionsPerIP: Int? = nil,
         useCookies: Bool = true,
         offlinePacketLimits: OfflinePacketLimits? = .init()
     ) throws -> RakNetListener {
-        guard (1...4096).contains(maximumConnections) else { throw RakNetTransportError.invalidConnectionLimit }
+        guard (1...4096).contains(maximumConnections),
+              maximumConnectionsPerIP.map({ (1...4096).contains($0) }) ?? true else {
+            throw RakNetTransportError.invalidConnectionLimit
+        }
         let server = try OfflineServer(
             guid: guid, advertisement: advertisement, maximumMTU: maximumMTU, udpOverhead: address.udpOverhead
         )
         let socket = try UDPSocket(bindTo: address, receiveTimeout: 20)
         return RakNetListener(
             socket: socket, server: server, maximumMTU: maximumMTU,
-            maximumConnections: maximumConnections, useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
+            maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
+            useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
         )
     }
 
@@ -144,6 +152,7 @@ struct TransportDriver {
         let advertisement: TransportAdvertisement
         let access: ListenerAccess
         let maximumConnections: Int
+        let maximumConnectionsPerIP: Int?
         let useCookies: Bool
         let offlinePacketLimits: RakNetListener.OfflinePacketLimits?
     }
@@ -185,6 +194,7 @@ struct TransportDriver {
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
     private var peers: [RakNetEndpoint: Peer] = [:]
+    private var connectionsByHost: [ListenerHost: Int] = [:]
     private var generation: UInt64 = 0
     private var cookies = OfflineCookies()
     private var offlineRate: OfflinePacketRate?
@@ -241,7 +251,7 @@ struct TransportDriver {
             if header & 0x80 == 0 {
                 guard offlineRate?.allow(address, at: now) != false else { return }
                 if let response = offlineResponse(datagram, from: address, listener: listener, at: now) {
-                    handleOffline(response, from: address, at: now, maximumConnections: listener.maximumConnections)
+                    handleOffline(response, from: address, at: now, listener: listener)
                 }
                 return
             }
@@ -334,17 +344,20 @@ struct TransportDriver {
     }
 
     private mutating func handleOffline(
-        _ response: OfflineServer.Response, from address: RakNetEndpoint, at now: UInt64, maximumConnections: Int
+        _ response: OfflineServer.Response, from address: RakNetEndpoint, at now: UInt64, listener: Listener
     ) {
         do {
             if let negotiation = response.negotiation, peers[address] == nil {
-                guard peers.count < maximumConnections else { return }
+                guard peers.count < listener.maximumConnections else { return }
+                let host = ListenerHost(address)
+                if let limit = listener.maximumConnectionsPerIP, connectionsByHost[host, default: 0] >= limit { return }
                 let key = TransportPeerKey(address: address, generation: generation)
                 generation &+= 1 // reused udp endpoints
                 let connection = try OnlineConnection(
                     accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
                 )
                 peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
+                if listener.maximumConnectionsPerIP != nil { connectionsByHost[host, default: 0] += 1 }
             }
             try socket.send(response.datagram, to: address)
         } catch {
@@ -394,7 +407,12 @@ struct TransportDriver {
     }
 
     private mutating func remove(_ address: RakNetEndpoint, failure: (any Error)? = nil) {
-        peers.removeValue(forKey: address)?.messages.finish(failure)
+        guard let peer = peers.removeValue(forKey: address) else { return }
+        peer.messages.finish(failure)
+        let host = ListenerHost(address)
+        if let count = connectionsByHost[host] {
+            connectionsByHost[host] = count > 1 ? count - 1 : nil
+        }
     }
 
     private func send(_ packets: [[UInt8]], to address: RakNetEndpoint) throws {

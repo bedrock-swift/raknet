@@ -72,3 +72,22 @@ import Testing
         #expect(allowed == expected)
     }
 }
+
+@Test(.timeLimit(.minutes(1))) func listenerReleasesPerIPConnectionSlots() async throws {
+    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let listener = try RakNetListener.listen(on: endpoint, maximumConnectionsPerIP: 1)
+    defer { listener.close() }
+
+    let first = try await RakNetConnection.dial(listener.localAddress)
+    let incoming = try await listener.accept()
+    let server = try #require(incoming)
+    await #expect(throws: RakNetTransportError.timedOut) {
+        try await RakNetConnection.dial(listener.localAddress, timeout: .milliseconds(200))
+    }
+
+    try await first.close()
+    let ended = try await server.receive()
+    #expect(ended == nil)
+    let next = try await RakNetConnection.dial(listener.localAddress)
+    try await next.close()
+}
