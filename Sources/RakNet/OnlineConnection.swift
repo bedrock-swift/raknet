@@ -34,33 +34,47 @@ public struct OnlineConnection: Sendable {
     private var pendingPing: UInt64?
 
     public init(
-        accepting client: IPv4Endpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false
-    ) throws {
-        try self.init(accepting: .ipv4(client), negotiation: negotiation, batchAcknowledgements: batchAcknowledgements)
-    }
-
-    public init(
-        accepting client: RakNetEndpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false
-    ) throws {
-        peer = client
-        state = .awaitingRequest(clientGUID: negotiation.clientGUID)
-        session = try ConnectedSession(mtu: negotiation.mtu, udpOverhead: client.udpOverhead, batchAcknowledgements: batchAcknowledgements)
-    }
-
-    public init(
-        connectingTo server: IPv4Endpoint, mtu: UInt16, clientGUID: Int64, batchAcknowledgements: Bool = false
+        accepting client: IPv4Endpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false,
+        congestionControl: Bool = false
     ) throws {
         try self.init(
-            connectingTo: .ipv4(server), mtu: mtu, clientGUID: clientGUID, batchAcknowledgements: batchAcknowledgements
+            accepting: .ipv4(client), negotiation: negotiation,
+            batchAcknowledgements: batchAcknowledgements, congestionControl: congestionControl
         )
     }
 
     public init(
-        connectingTo server: RakNetEndpoint, mtu: UInt16, clientGUID: Int64, batchAcknowledgements: Bool = false
+        accepting client: RakNetEndpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false,
+        congestionControl: Bool = false
+    ) throws {
+        peer = client
+        state = .awaitingRequest(clientGUID: negotiation.clientGUID)
+        session = try ConnectedSession(
+            mtu: negotiation.mtu, udpOverhead: client.udpOverhead,
+            batchAcknowledgements: batchAcknowledgements, congestionControl: congestionControl
+        )
+    }
+
+    public init(
+        connectingTo server: IPv4Endpoint, mtu: UInt16, clientGUID: Int64, batchAcknowledgements: Bool = false,
+        congestionControl: Bool = false
+    ) throws {
+        try self.init(
+            connectingTo: .ipv4(server), mtu: mtu, clientGUID: clientGUID,
+            batchAcknowledgements: batchAcknowledgements, congestionControl: congestionControl
+        )
+    }
+
+    public init(
+        connectingTo server: RakNetEndpoint, mtu: UInt16, clientGUID: Int64, batchAcknowledgements: Bool = false,
+        congestionControl: Bool = false
     ) throws {
         peer = server
         state = .idle(clientGUID: clientGUID)
-        session = try ConnectedSession(mtu: mtu, udpOverhead: server.udpOverhead, batchAcknowledgements: batchAcknowledgements)
+        session = try ConnectedSession(
+            mtu: mtu, udpOverhead: server.udpOverhead,
+            batchAcknowledgements: batchAcknowledgements, congestionControl: congestionControl
+        )
     }
 
     public var isOpen: Bool { state == .open }

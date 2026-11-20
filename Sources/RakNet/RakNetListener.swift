@@ -305,7 +305,8 @@ struct TransportDriver {
         case let .negotiated(negotiation):
             let key = TransportPeerKey(address: address, generation: generation)
             var connection = try OnlineConnection(
-                connectingTo: address, mtu: negotiation.mtu, clientGUID: attempt.guid, batchAcknowledgements: true
+                connectingTo: address, mtu: negotiation.mtu, clientGUID: attempt.guid,
+                batchAcknowledgements: true, congestionControl: true
             )
             try send(try connection.start(at: now), to: address)
             peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
@@ -341,7 +342,7 @@ struct TransportDriver {
                 let key = TransportPeerKey(address: address, generation: generation)
                 generation &+= 1 // reused udp endpoints
                 let connection = try OnlineConnection(
-                    accepting: address, negotiation: negotiation, batchAcknowledgements: true
+                    accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
                 )
                 peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
             }

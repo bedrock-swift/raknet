@@ -13,8 +13,13 @@ public struct ConnectedSession: Sendable {
         public fileprivate(set) var payloads: [[UInt8]] = []
     }
 
-    private struct Pending: Sendable {
+    private struct Outbound: Sendable {
         let frames: [Frame]
+        let size: Int
+    }
+
+    private struct Pending: Sendable {
+        let datagram: Outbound
         let sentAt: UInt64
         let retries: Int
     }
@@ -51,6 +56,11 @@ public struct ConnectedSession: Sendable {
     private var nextSequence = [UInt32](repeating: 0, count: 32)
     private var nextFragment: UInt16 = 0
     private var sent: [UInt32: Pending] = [:]
+    private var bytesInFlight = 0
+    private var congestion: CongestionWindow?
+    private var awaitingSend: [Outbound] = []
+    private var sendOffset = 0
+    private var queuedFrames = 0
     private var retransmissionTimer = RetransmissionTimer()
     private var incoming = SequenceWindow(size: windowSize)
     private var reliable = SequenceWindow(size: windowSize)
@@ -61,15 +71,19 @@ public struct ConnectedSession: Sendable {
     private var fragments: [FragmentKey: Assembly] = [:]
     private var bufferedBytes = 0
 
-    public init(mtu: UInt16, batchAcknowledgements: Bool = false) throws {
-        try self.init(mtu: mtu, udpOverhead: OfflineWire.ipv4UDPOverhead, batchAcknowledgements: batchAcknowledgements)
+    public init(mtu: UInt16, batchAcknowledgements: Bool = false, congestionControl: Bool = false) throws {
+        try self.init(
+            mtu: mtu, udpOverhead: OfflineWire.ipv4UDPOverhead,
+            batchAcknowledgements: batchAcknowledgements, congestionControl: congestionControl
+        )
     }
 
-    init(mtu: UInt16, udpOverhead: Int, batchAcknowledgements: Bool) throws {
+    init(mtu: UInt16, udpOverhead: Int, batchAcknowledgements: Bool, congestionControl: Bool) throws {
         guard OfflineWire.mtuRange.contains(mtu) else { throw SessionError.invalidMTU }
         datagramLimit = Int(mtu) - udpOverhead
         peerDatagramLimit = Int(mtu) // peer udp mtu convention
         self.batchAcknowledgements = batchAcknowledgements
+        congestion = congestionControl ? CongestionWindow(datagramSize: datagramLimit) : nil
     }
 
     public var roundTripTime: Duration? {
@@ -112,14 +126,14 @@ public struct ConnectedSession: Sendable {
         }
         if reliableFrames > 0, !canSend(reliableFrames) { throw SessionError.sendWindowFull }
 
-        var datagrams: [[UInt8]] = []
+        var prepared: [Outbound] = []
         var frames: [Frame] = []
         var size = SessionDatagram.frameHeaderSize
         for (payload, chunkSize) in zip(payloads, chunkSizes) {
             for frame in makeFrames(for: payload, reliability: reliability, channel: channel, chunkSize: chunkSize) {
                 let frameSize = frame.encodedSize
                 if size + frameSize > datagramLimit {
-                    datagrams.append(emit(frames, at: milliseconds, retries: 0))
+                    prepared.append(Outbound(frames: frames, size: size))
                     frames.removeAll(keepingCapacity: true)
                     size = SessionDatagram.frameHeaderSize
                 }
@@ -127,8 +141,13 @@ public struct ConnectedSession: Sendable {
                 size += frameSize
             }
         }
-        if !frames.isEmpty { datagrams.append(emit(frames, at: milliseconds, retries: 0)) }
-        return datagrams
+        if !frames.isEmpty { prepared.append(Outbound(frames: frames, size: size)) }
+        guard congestion != nil, reliability.hasMessageIndex else {
+            return prepared.map { emit($0, at: milliseconds, retries: 0) }
+        }
+        awaitingSend += prepared
+        queuedFrames += reliableFrames
+        return flushOutbound(at: milliseconds)
     }
 
     private mutating func makeFrames(
@@ -161,12 +180,16 @@ public struct ConnectedSession: Sendable {
     }
 
     private func canSend(_ count: Int) -> Bool {
-        let inFlight = sent.values.reduce(0) { $0 + $1.frames.count }
-        return inFlight + count <= Self.windowSize && sent.values.allSatisfy { packet in
-            guard let index = packet.frames.first?.messageIndex else { return true }
-            let age = (nextMessage &- index) & Self.sequenceMask
-            return Int(age) + count <= Self.windowSize
-        }
+        let inFlight = sent.values.reduce(0) { $0 + $1.datagram.frames.count }
+        guard inFlight + queuedFrames + count <= Self.windowSize else { return false }
+        if queuedFrames > 0, !fitsWindow(awaitingSend[sendOffset], adding: count) { return false }
+        return sent.values.allSatisfy { fitsWindow($0.datagram, adding: count) }
+    }
+
+    private func fitsWindow(_ datagram: Outbound, adding count: Int) -> Bool {
+        guard let index = datagram.frames.first?.messageIndex else { return true }
+        let age = (nextMessage &- index) & Self.sequenceMask
+        return Int(age) + count <= Self.windowSize
     }
 
     public mutating func receive(_ datagram: [UInt8], at milliseconds: UInt64) throws -> Input {
@@ -177,13 +200,14 @@ public struct ConnectedSession: Sendable {
         case let .acknowledgement(sequences):
             var sample: UInt64?
             for sequence in sequences {
-                guard let packet = sent.removeValue(forKey: sequence), packet.retries == 0,
-                      milliseconds >= packet.sentAt else { continue }
+                guard let packet = takePending(sequence) else { continue }
+                congestion?.acknowledge(sequence: sequence, bytes: packet.datagram.size)
+                guard packet.retries == 0, milliseconds >= packet.sentAt else { continue }
                 let elapsed = milliseconds - packet.sentAt
                 sample = min(sample ?? elapsed, elapsed) // one sample per acknowledgement
             }
             if let sample { observeRoundTripTime(sample) }
-            return Input()
+            return Input(replies: flushOutbound(at: milliseconds))
         case let .negativeAcknowledgement(sequences):
             return Input(replies: try resend(sequences, at: milliseconds))
         case let .frames(sequence, frames):
@@ -219,10 +243,10 @@ public struct ConnectedSession: Sendable {
             let delay = retransmissionTimer.delay(after: packet.retries)
             return milliseconds >= packet.sentAt && milliseconds - packet.sentAt >= delay ? sequence : nil
         }
-        return try resend(expired, at: milliseconds)
+        return try resend(expired, at: milliseconds) + flushOutbound(at: milliseconds)
     }
 
-    var hasPending: Bool { !sent.isEmpty }
+    var hasPending: Bool { !sent.isEmpty || queuedFrames > 0 }
 
     mutating func sendControl(_ payload: [UInt8]) -> [UInt8] {
         let frame = Frame(reliability: .unreliable, messageIndex: nil, order: nil, fragment: nil, payload: payload)
@@ -236,18 +260,46 @@ public struct ConnectedSession: Sendable {
         return sequence
     }
 
-    private mutating func emit(_ frames: [Frame], at time: UInt64, retries: Int) -> [UInt8] {
+    private mutating func emit(_ datagram: Outbound, at time: UInt64, retries: Int) -> [UInt8] {
         let sequence = takeSequence()
-        if frames.first?.reliability.hasMessageIndex == true {
-            sent[sequence] = Pending(frames: frames, sentAt: time, retries: retries)
+        if datagram.frames.first?.reliability.hasMessageIndex == true {
+            sent[sequence] = Pending(datagram: datagram, sentAt: time, retries: retries)
+            bytesInFlight += datagram.size
         }
-        return SessionDatagram.encode(sequence: sequence, frames: frames)
+        return SessionDatagram.encode(sequence: sequence, frames: datagram.frames)
+    }
+
+    private mutating func takePending(_ sequence: UInt32) -> Pending? {
+        guard let packet = sent.removeValue(forKey: sequence) else { return nil }
+        bytesInFlight -= packet.datagram.size
+        return packet
+    }
+
+    private mutating func flushOutbound(at time: UInt64) -> [[UInt8]] {
+        guard let congestion, queuedFrames > 0 else { return [] }
+        var replies: [[UInt8]] = []
+        while sendOffset < awaitingSend.count {
+            let datagram = awaitingSend[sendOffset]
+            guard datagram.size <= congestion.bytes - bytesInFlight else { break }
+            replies.append(emit(datagram, at: time, retries: 0))
+            queuedFrames -= datagram.frames.count
+            sendOffset += 1
+        }
+        if sendOffset == awaitingSend.count {
+            awaitingSend.removeAll(keepingCapacity: true)
+            sendOffset = 0
+        } else if sendOffset >= awaitingSend.count - sendOffset {
+            awaitingSend.removeFirst(sendOffset)
+            sendOffset = 0
+        }
+        return replies
     }
 
     private mutating func resend(_ sequences: [UInt32], at time: UInt64) throws -> [[UInt8]] {
         guard sequences.allSatisfy({ (sent[$0]?.retries ?? 0) < 8 }) else { throw SessionError.retryLimit }
-        let packets = sequences.compactMap { sent.removeValue(forKey: $0) }
-        return packets.map { emit($0.frames, at: time, retries: $0.retries + 1) } // new datagram index
+        let packets = sequences.compactMap { takePending($0) }
+        if !packets.isEmpty { congestion?.reportLoss(nextSequence: nextDatagram) }
+        return packets.map { emit($0.datagram, at: time, retries: $0.retries + 1) } // new datagram index
     }
 
     private mutating func deliver(_ frame: Frame, into payloads: inout [[UInt8]]) throws {

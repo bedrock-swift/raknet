@@ -146,3 +146,26 @@ import Testing
     try #require(packets.count == 1)
     #expect(try receiver.receive(packets[0], at: 2).payloads == [[0xfe], [0xfd]])
 }
+
+@Test func congestionWindowReleasesQueuedDatagramsAfterAcknowledgement() throws {
+    var sender = try ConnectedSession(mtu: 400, congestionControl: true)
+    var receiver = try ConnectedSession(mtu: 400)
+    let payloads = (1...4).map { [UInt8](repeating: UInt8($0), count: 358) }
+    let initial = try sender.sendBatch(payloads, at: 0)
+    try #require(initial.count == 1)
+    #expect(try sender.retransmit(at: 299).isEmpty)
+    let retry = try sender.retransmit(at: 300)
+    try #require(retry.count == 1)
+    let first = try receiver.receive(retry[0], at: 301)
+    #expect(first.payloads == [payloads[0]])
+    let ack = try #require(first.replies.first)
+    let afterAck = try sender.receive(ack, at: 302)
+    try #require(afterAck.replies.count == 2)
+    let second = try receiver.receive(afterAck.replies[0], at: 303)
+    #expect(second.payloads == [payloads[1]])
+    let secondAck = try #require(second.replies.first)
+    let further = try sender.receive(secondAck, at: 304)
+    let last = try #require(further.replies.first)
+    #expect(try receiver.receive(last, at: 305).payloads.isEmpty)
+    #expect(try receiver.receive(afterAck.replies[1], at: 306).payloads == [payloads[2], payloads[3]])
+}
