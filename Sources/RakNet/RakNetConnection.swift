@@ -38,6 +38,7 @@ public final class RakNetConnection: Sendable {
     }
 
     public var roundTripTime: Duration? { metrics.roundTripTime }
+    public var sendCapacity: Int { metrics.sendCapacity }
 
     public func maximumMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
         ConnectedSession.maximumMessageLength(datagramLimit: Int(mtu) - remoteAddress.udpOverhead, reliability: reliability)
@@ -84,13 +85,21 @@ public final class RakNetConnection: Sendable {
 final class TransportMetrics: @unchecked Sendable {
     private let lock = NSLock()
     private var measuredRTT: Duration?
+    private var capacity = 0
 
     var roundTripTime: Duration? {
         lock.withLock { measuredRTT }
     }
 
-    func update(roundTripTime: Duration?) {
-        lock.withLock { measuredRTT = roundTripTime }
+    var sendCapacity: Int {
+        lock.withLock { capacity }
+    }
+
+    func update(from connection: OnlineConnection) {
+        lock.withLock {
+            measuredRTT = connection.roundTripTime
+            capacity = connection.sendCapacity ?? 0
+        }
     }
 }
 

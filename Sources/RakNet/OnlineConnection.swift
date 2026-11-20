@@ -80,6 +80,7 @@ public struct OnlineConnection: Sendable {
     public var isOpen: Bool { state == .open }
     public var isClosed: Bool { state == .closed }
     public var roundTripTime: Duration? { session.roundTripTime }
+    public var sendCapacity: Int? { session.sendCapacity }
 
     public func maximumMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
         session.maximumMessageLength(for: reliability)

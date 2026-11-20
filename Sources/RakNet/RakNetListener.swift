@@ -275,7 +275,7 @@ struct TransportDriver {
             let input = try peer.connection.receive(datagram, from: address, at: now)
             try send(input.replies, to: address)
             peer.lastPacket = now
-            peer.metrics.update(roundTripTime: peer.connection.roundTripTime)
+            peer.metrics.update(from: peer.connection)
             if input.opened {
                 dial = nil
                 let connection = RakNetConnection(
@@ -387,6 +387,7 @@ struct TransportDriver {
                 let packets = try peer.connection.sendBatch(
                     payloads, reliability: reliability, channel: channel, priority: priority, at: now
                 )
+                peer.metrics.update(from: peer.connection)
                 try send(packets, to: key.address)
             case let .close(key, _):
                 if let peer = peers[key.address], peer.key == key, peer.connection.isOpen {
@@ -407,7 +408,9 @@ struct TransportDriver {
                 continue
             }
             do {
-                try send(try peer.connection.update(at: now), to: address)
+                let packets = try peer.connection.update(at: now)
+                if !packets.isEmpty { peer.metrics.update(from: peer.connection) }
+                try send(packets, to: address)
                 if now >= peer.nextPing, let ping = peer.connection.keepalive(at: now) { // idle peer probe
                     try socket.send(ping, to: address)
                     peer.nextPing = now + 2_000

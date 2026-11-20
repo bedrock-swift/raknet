@@ -151,7 +151,9 @@ import Testing
     var sender = try ConnectedSession(mtu: 400, congestionControl: true)
     var receiver = try ConnectedSession(mtu: 400)
     let payloads = (1...4).map { [UInt8](repeating: UInt8($0), count: 358) }
+    #expect(sender.sendCapacity == 372)
     let initial = try sender.sendBatch(payloads, at: 0)
+    #expect(sender.sendCapacity == 0)
     try #require(initial.count == 1)
     #expect(try sender.retransmit(at: 299).isEmpty)
     let retry = try sender.retransmit(at: 300)

@@ -95,6 +95,7 @@ public struct ConnectedSession: Sendable {
     private var congestion: CongestionWindow?
     private var outbound = RakNetPriority.allCases.map { _ in OutboundQueue() }
     private var queuedFrames = 0
+    private var queuedBytes = 0
     private var retransmissionTimer = RetransmissionTimer()
     private var incoming = SequenceWindow(size: windowSize)
     private var reliable = SequenceWindow(size: windowSize)
@@ -122,6 +123,10 @@ public struct ConnectedSession: Sendable {
 
     public var roundTripTime: Duration? {
         retransmissionTimer.smoothed.map { .milliseconds(Int64($0)) }
+    }
+
+    public var sendCapacity: Int? {
+        congestion.map { max(0, $0.bytes - bytesInFlight - queuedBytes) }
     }
 
     public func maximumMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
@@ -197,6 +202,7 @@ public struct ConnectedSession: Sendable {
         guard enqueue else { return prepared.map { emit($0, at: milliseconds, retries: 0) } }
         outbound[priority.rawValue].append(prepared)
         queuedFrames += frameCount
+        queuedBytes += prepared.reduce(0) { $0 + $1.size }
         return priority == .immediate ? flushOutbound(at: milliseconds) : []
     }
 
@@ -343,6 +349,7 @@ public struct ConnectedSession: Sendable {
                 guard datagram.size <= available else { return replies }
                 replies.append(emit(datagram, at: time, retries: 0))
                 queuedFrames -= datagram.frames.count
+                queuedBytes -= datagram.size
                 available -= datagram.size
                 outbound[priority].dropFirst()
             }
