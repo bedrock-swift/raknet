@@ -85,11 +85,16 @@ public enum RakNetEndpoint: Hashable, Sendable, Codable {
         )) // socket peer identity
     }
 
-    var forLocalWake: RakNetEndpoint {
-        guard isUnspecified else { return self }
+    func forLocalWake(port: UInt16? = nil) -> RakNetEndpoint {
+        let port = port ?? self.port
         switch self {
-        case .ipv4: return .ipv4(IPv4Endpoint(address: 0x7f000001, port: port))
-        case .ipv6: return .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: port))
+        case let .ipv4(endpoint):
+            return .ipv4(IPv4Endpoint(address: isUnspecified ? 0x7f000001 : endpoint.address, port: port))
+        case let .ipv6(endpoint):
+            return .ipv6(IPv6Endpoint(
+                addressHigh: endpoint.addressHigh, addressLow: isUnspecified ? 1 : endpoint.addressLow,
+                port: port, scopeID: endpoint.scopeID
+            ))
         }
     }
 

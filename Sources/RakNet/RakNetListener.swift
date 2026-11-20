@@ -174,12 +174,14 @@ struct TransportDriver {
     static func launch(
         socket: UDPSocket, role: Role, accepted: TransportInbox<RakNetConnection>, commands: TransportCommands
     ) {
-        if let wake = try? UDPSocket(clientFor: socket.localAddress) {
-            let destination = socket.localAddress.forLocalWake
-            commands.installWake { try? wake.send([0], to: destination) }
-        }
+        let destination = socket.localAddress.forLocalWake()
+        let wake = try? UDPSocket(bindTo: destination.forLocalWake(port: 0))
+        if let wake { commands.installWake { try? wake.send([0], to: destination) } }
+        let wakeSource = wake?.localAddress.socketPeer
         DispatchQueue(label: "raknet.udp").async { // socket owner
-            var driver = TransportDriver(socket: socket, role: role, accepted: accepted, commands: commands)
+            var driver = TransportDriver(
+                socket: socket, wakeSource: wakeSource, role: role, accepted: accepted, commands: commands
+            )
             driver.run()
         }
     }
@@ -210,6 +212,7 @@ struct TransportDriver {
     }
 
     private let socket: UDPSocket
+    private let wakeSource: RakNetEndpoint?
     private let role: Role
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
@@ -221,9 +224,11 @@ struct TransportDriver {
     private var dial: DialAttempt?
 
     private init(
-        socket: UDPSocket, role: Role, accepted: TransportInbox<RakNetConnection>, commands: TransportCommands
+        socket: UDPSocket, wakeSource: RakNetEndpoint?, role: Role,
+        accepted: TransportInbox<RakNetConnection>, commands: TransportCommands
     ) {
         self.socket = socket
+        self.wakeSource = wakeSource
         self.role = role
         self.accepted = accepted
         self.commands = commands
@@ -258,7 +263,7 @@ struct TransportDriver {
                     nextMaintenance = now + 20
                 }
                 if let datagram = try socket.receive(into: &buffer), commands.isOpen,
-                   datagram.bytes != [0] { // command wakeup
+                   datagram.bytes != [0] || datagram.sender.socketPeer != wakeSource { // command wakeup
                     try receive(datagram.bytes, from: datagram.sender, at: transportTime())
                 }
                 if role.isClient, dial == nil, peers.isEmpty { break }

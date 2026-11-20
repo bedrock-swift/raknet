@@ -19,18 +19,23 @@ import Testing
     #expect(datagram.sender == sender.localAddress)
 }
 
-@Test func commandsWakeAnIdleSocketAndCoalesceQueuedWork() throws {
-    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+@Test(arguments: [false, true])
+func commandsWakeAnIdleSocketAndCoalesceQueuedWork(useIPv6: Bool) throws {
+    let endpoint: RakNetEndpoint = useIPv6
+        ? .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 0, port: 0))
+        : .ipv4(IPv4Endpoint(address: 0, port: 0))
     let receiver = try UDPSocket(bindTo: endpoint, receiveTimeout: 80)
-    let sender = try UDPSocket(bindTo: endpoint)
+    let destination = receiver.localAddress.forLocalWake()
+    let sender = try UDPSocket(bindTo: destination.forLocalWake(port: 0))
     let commands = TransportCommands()
-    commands.installWake { try? sender.send([0], to: receiver.localAddress) }
+    commands.installWake { try? sender.send([0], to: destination) }
     let key = TransportPeerKey(address: receiver.localAddress, generation: 0)
     var buffer = [UInt8](repeating: 0, count: 32)
     commands.submit(.close(key, nil))
     commands.submit(.close(key, nil))
     let first = try receiver.receive(into: &buffer)
     #expect(first?.bytes == [0])
+    #expect(first?.sender.socketPeer == sender.localAddress.socketPeer)
     let duplicate = try receiver.receive(into: &buffer)
     #expect(duplicate == nil)
     #expect(commands.drain().count == 2)
