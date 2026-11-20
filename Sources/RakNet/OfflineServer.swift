@@ -1,17 +1,3 @@
-public struct IPv4Endpoint: Hashable, Sendable {
-    public let address: UInt32
-    public let port: UInt16
-
-    public init(address: UInt32, port: UInt16) {
-        self.address = address
-        self.port = port
-    }
-
-    var wireBytes: [UInt8] {
-        [4] + bigEndianBytes(~address) + bigEndianBytes(port)
-    }
-}
-
 public struct OfflineServer: Sendable {
     public enum ConfigurationError: Error, Equatable {
         case invalidMTU
@@ -56,15 +42,30 @@ public struct OfflineServer: Sendable {
     }
 
     public func reply(to datagram: [UInt8], from sender: IPv4Endpoint) -> [UInt8]? {
+        reply(to: datagram, from: .ipv4(sender))
+    }
+
+    public func reply(to datagram: [UInt8], from sender: RakNetEndpoint) -> [UInt8]? {
         receive(datagram, from: sender)?.datagram
     }
 
     public func receive(_ datagram: [UInt8], from sender: IPv4Endpoint) -> Response? {
+        receive(datagram, from: .ipv4(sender))
+    }
+
+    public func receive(_ datagram: [UInt8], from sender: RakNetEndpoint) -> Response? {
         receive(datagram, from: sender, cookie: nil)
     }
 
     func receive(
         _ datagram: [UInt8], from sender: IPv4Endpoint, cookie: UInt32?,
+        advertisement override: (() -> [UInt8])? = nil
+    ) -> Response? {
+        receive(datagram, from: .ipv4(sender), cookie: cookie, advertisement: override)
+    }
+
+    func receive(
+        _ datagram: [UInt8], from sender: RakNetEndpoint, cookie: UInt32?,
         advertisement override: (() -> [UInt8])? = nil
     ) -> Response? {
         switch datagram.first {
@@ -73,6 +74,7 @@ public struct OfflineServer: Sendable {
                 return nil
             }
             let data = override?() ?? advertisement
+            guard data.count + 33 <= Int(maximumMTU) - sender.udpOverhead else { return nil }
             return Response(datagram: [0x1c] + datagram[1..<9] + guid + OfflineWire.magic + data, negotiation: nil)
         case OfflineWire.openRequestOne:
             guard datagram.count >= 18, datagram[1..<17].elementsEqual(OfflineWire.magic) else {
@@ -81,7 +83,7 @@ public struct OfflineServer: Sendable {
             guard datagram[17] == protocolVersion else {
                 return Response(datagram: [0x19, protocolVersion] + OfflineWire.magic + guid, negotiation: nil)
             }
-            let headerSize = OfflineWire.ipv4UDPOverhead
+            let headerSize = sender.udpOverhead
             guard datagram.count >= Int(OfflineWire.mtuRange.lowerBound) - headerSize else {
                 return nil
             }
@@ -93,19 +95,17 @@ public struct OfflineServer: Sendable {
             return Response(datagram: reply, negotiation: nil)
         case OfflineWire.openRequestTwo:
             let address = cookie == nil ? 17 : 22 // cookie and client security flag
-            guard datagram.count == address + 17, datagram[1..<17].elementsEqual(OfflineWire.magic),
-                  datagram[address] == 4 else {
-                return nil
-            }
+            guard datagram.count > address, datagram[1..<17].elementsEqual(OfflineWire.magic) else { return nil }
             if let cookie, UInt32(wireBytes: datagram[17..<21]) != cookie { return nil }
-            let mtuOffset = address + 7
-            let requestedMTU = UInt16(wireBytes: datagram[mtuOffset..<(mtuOffset + 2)])
+            var reader = DatagramReader(Array(datagram.dropFirst(address)))
+            guard RakNetEndpoint(reading: &reader) != nil,
+                  let requestedMTU = reader.integer(UInt16.self),
+                  let clientGUID = reader.integer(Int64.self), reader.finished else { return nil }
             guard requestedMTU >= OfflineWire.mtuRange.lowerBound else {
                 return nil
             }
             let mtu = min(requestedMTU, maximumMTU)
             let reply = [0x08] + OfflineWire.magic + guid + sender.wireBytes + bigEndianBytes(mtu) + [0]
-            let clientGUID = Int64(wireBytes: datagram.suffix(8))
             return Response(datagram: reply, negotiation: Negotiation(mtu: mtu, clientGUID: clientGUID))
         default:
             return nil

@@ -6,7 +6,7 @@ public struct OfflineClient: Sendable {
 
     public struct Negotiation: Equatable, Sendable {
         public let serverGUID: UInt64
-        public let clientAddress: IPv4Endpoint
+        public let clientAddress: RakNetEndpoint
         public let mtu: UInt16
     }
 
@@ -22,7 +22,7 @@ public struct OfflineClient: Sendable {
         case finished
     }
 
-    private let server: IPv4Endpoint
+    private let server: RakNetEndpoint
     public let guid: Int64
     private let protocolVersion: UInt8
     private var state = State.idle
@@ -30,6 +30,14 @@ public struct OfflineClient: Sendable {
     public init(
         server: IPv4Endpoint,
         guid: Int64 = .random(in: Int64.min ... -1), // vanilla client guid sign
+        protocolVersion: UInt8 = 11
+    ) {
+        self.init(server: .ipv4(server), guid: guid, protocolVersion: protocolVersion)
+    }
+
+    public init(
+        server: RakNetEndpoint,
+        guid: Int64 = .random(in: Int64.min ... -1),
         protocolVersion: UInt8 = 11
     ) {
         self.server = server
@@ -41,7 +49,7 @@ public struct OfflineClient: Sendable {
         guard OfflineWire.mtuRange.contains(mtu) else { throw HandshakeError.invalidMTU }
         state = .probing(mtu)
         var probe = [0x05] + OfflineWire.magic + [protocolVersion]
-        let size = Int(mtu) - OfflineWire.ipv4UDPOverhead
+        let size = Int(mtu) - server.udpOverhead
         probe.append(contentsOf: repeatElement(0, count: size - probe.count))
         return probe
     }
@@ -52,6 +60,10 @@ public struct OfflineClient: Sendable {
     }
 
     public mutating func receive(_ datagram: [UInt8], from sender: IPv4Endpoint) throws -> Event? {
+        try receive(datagram, from: .ipv4(sender))
+    }
+
+    public mutating func receive(_ datagram: [UInt8], from sender: RakNetEndpoint) throws -> Event? {
         guard sender == server else { return nil }
         switch (state, datagram.first) {
         case (.probing, 0x19):
@@ -83,17 +95,13 @@ public struct OfflineClient: Sendable {
             state = .opening(serverGUID: serverGUID, mtu: mtu, request: request)
             return .send(request)
         case let (.opening(serverGUID, offeredMTU, _), 0x08):
-            guard datagram.count == 35, datagram[1..<17].elementsEqual(OfflineWire.magic),
-                  UInt64(wireBytes: datagram[17..<25]) == serverGUID,
-                  datagram[25] == 4, datagram[34] == 0 else {
-                return nil
-            }
-            let mtu = UInt16(wireBytes: datagram[32..<34])
-            guard (OfflineWire.mtuRange.lowerBound...offeredMTU).contains(mtu) else { return nil }
-            let address = IPv4Endpoint(
-                address: ~UInt32(wireBytes: datagram[26..<30]),
-                port: UInt16(wireBytes: datagram[30..<32])
-            )
+            guard datagram.count > 25, datagram[1..<17].elementsEqual(OfflineWire.magic),
+                  UInt64(wireBytes: datagram[17..<25]) == serverGUID else { return nil }
+            var reader = DatagramReader(Array(datagram.dropFirst(25)))
+            guard let address = RakNetEndpoint(reading: &reader),
+                  let mtu = reader.integer(UInt16.self),
+                  (OfflineWire.mtuRange.lowerBound...offeredMTU).contains(mtu),
+                  reader.byte() == 0, reader.finished else { return nil }
             state = .finished
             return .negotiated(Negotiation(serverGUID: serverGUID, clientAddress: address, mtu: mtu))
         default:
