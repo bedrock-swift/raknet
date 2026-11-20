@@ -380,7 +380,7 @@ struct TransportDriver {
     private mutating func perform(_ command: TransportCommands.Command, at now: UInt64) {
         do {
             switch command {
-            case let .send(key, payloads, reliability, channel, priority, _):
+            case let .send(key, payloads, reliability, channel, priority, continuation):
                 guard let peer = peers[key.address], peer.key == key, peer.connection.isOpen else {
                     throw RakNetTransportError.closed
                 }
@@ -389,14 +389,23 @@ struct TransportDriver {
                 )
                 peer.metrics.update(from: peer.connection)
                 try send(packets, to: key.address)
-            case let .close(key, _):
+                continuation.resume()
+            case let .close(key, continuation):
                 if let peer = peers[key.address], peer.key == key, peer.connection.isOpen {
                     try send(try peer.connection.close(at: now), to: key.address)
                 }
+                continuation?.resume()
+            case let .snapshot(key, continuation):
+                guard let peer = peers[key.address], peer.key == key, peer.connection.isOpen else {
+                    throw RakNetTransportError.closed
+                }
+                continuation.resume(returning: RakNetSessionSnapshot(
+                    localAddress: socket.localAddress, mtu: peer.mtu, state: peer.connection,
+                    bufferedPayloads: peer.messages.bufferedValues(), capturedAt: now
+                ))
             }
-            command.complete(.success(()))
         } catch {
-            command.complete(.failure(error))
+            command.fail(error)
         }
     }
 

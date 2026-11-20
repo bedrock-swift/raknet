@@ -63,6 +63,8 @@ Use `RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 19132
 
 The default MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OnlineConnection` exposes the protocol state machine for applications that provide their own UDP I/O. Call `update(at:)` periodically to send pending acknowledgements, retries, and queued payloads.
 
+Use `try await connection.snapshot()` to capture an in-memory snapshot for custom I/O. It includes unread payloads and the monotonic time in milliseconds at capture.
+
 ## Development
 
 Build with [Swift 6.0 or later](https://www.swift.org/install/). On Windows, follow the [Swift installation requirements](https://www.swift.org/install/windows/manual/).

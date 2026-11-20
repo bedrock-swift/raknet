@@ -10,6 +10,31 @@ public enum RakNetTransportError: Error, Equatable {
     case invalidRemoteAddress
 }
 
+public struct RakNetSessionSnapshot: Sendable {
+    public let localAddress: RakNetEndpoint
+    public let mtu: UInt16
+    public let bufferedPayloads: [[UInt8]]
+    public let capturedAt: UInt64
+    public var remoteAddress: RakNetEndpoint { state.peer }
+
+    private let state: OnlineConnection
+
+    init(
+        localAddress: RakNetEndpoint, mtu: UInt16, state: OnlineConnection,
+        bufferedPayloads: [[UInt8]], capturedAt: UInt64
+    ) {
+        self.localAddress = localAddress
+        self.mtu = mtu
+        self.state = state
+        self.bufferedPayloads = bufferedPayloads
+        self.capturedAt = capturedAt
+    }
+
+    public func restore() -> OnlineConnection {
+        state
+    }
+}
+
 public final class RakNetConnection: Sendable {
     public let localAddress: RakNetEndpoint
     public let remoteAddress: RakNetEndpoint
@@ -75,6 +100,15 @@ public final class RakNetConnection: Sendable {
         try await messages.next()
     }
 
+    public func snapshot() async throws -> RakNetSessionSnapshot {
+        try Task.checkCancellation()
+        let snapshot: RakNetSessionSnapshot = try await withCheckedThrowingContinuation { continuation in
+            commands.submit(.snapshot(key, continuation))
+        }
+        try Task.checkCancellation()
+        return snapshot
+    }
+
     public func close() async throws {
         try await withCheckedThrowingContinuation { continuation in
             commands.submit(.close(key, continuation))
@@ -112,21 +146,21 @@ final class TransportCommands: @unchecked Sendable {
     enum Command: Sendable {
         case send(TransportPeerKey, [[UInt8]], RakNetReliability, UInt8, RakNetPriority, CheckedContinuation<Void, any Error>)
         case close(TransportPeerKey, CheckedContinuation<Void, any Error>?)
+        case snapshot(TransportPeerKey, CheckedContinuation<RakNetSessionSnapshot, any Error>)
 
-        func complete(_ result: Result<Void, any Error>) {
+        func fail(_ error: any Error) {
             switch self {
-            case let .send(_, _, _, _, _, continuation):
-                continuation.resume(with: result)
-            case let .close(_, continuation):
-                continuation?.resume(with: result)
+            case let .send(_, _, _, _, _, continuation): continuation.resume(throwing: error)
+            case let .close(_, continuation): continuation?.resume(throwing: error)
+            case let .snapshot(_, continuation): continuation.resume(throwing: error)
             }
         }
 
         func stop() {
-            if case .close = self {
-                complete(.success(()))
+            if case let .close(_, continuation) = self {
+                continuation?.resume()
             } else {
-                complete(.failure(RakNetTransportError.closed))
+                fail(RakNetTransportError.closed)
             }
         }
     }
@@ -142,7 +176,7 @@ final class TransportCommands: @unchecked Sendable {
                 return
             }
             guard pending.count < 256 else {
-                command.complete(.failure(RakNetTransportError.sendQueueFull))
+                command.fail(RakNetTransportError.sendQueueFull)
                 return
             }
             pending.append(command)

@@ -66,6 +66,10 @@ final class TransportInbox<Element: Sendable>: @unchecked Sendable {
         }
     }
 
+    func bufferedValues() -> [Element] {
+        lock.withLock { buffered.map(\.value) }
+    }
+
     func finish(_ error: (any Error)? = nil, discardBuffered: Bool = false) {
         lock.withLock {
             guard !finished else { return }
