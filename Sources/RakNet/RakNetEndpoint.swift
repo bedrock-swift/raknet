@@ -52,6 +52,21 @@ public enum RakNetEndpoint: Hashable, Sendable {
         }
     }
 
+    var socketPeer: RakNetEndpoint {
+        guard case let .ipv6(endpoint) = self, endpoint.flowInfo != 0 else { return self }
+        return .ipv6(IPv6Endpoint(
+            addressHigh: endpoint.addressHigh, addressLow: endpoint.addressLow, port: endpoint.port,
+            scopeID: endpoint.scopeID
+        )) // socket peer identity
+    }
+
+    var isUnspecified: Bool {
+        switch self {
+        case let .ipv4(endpoint): endpoint.address == 0
+        case let .ipv6(endpoint): endpoint.addressHigh == 0 && endpoint.addressLow == 0
+        }
+    }
+
     var udpOverhead: Int {
         switch self {
         case .ipv4: OfflineWire.ipv4UDPOverhead

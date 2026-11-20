@@ -16,7 +16,7 @@ package final class UDPSocket: Sendable {
     enum SocketError: Error {
         case startup(Int32)
         case create(Int32)
-        case bind(IPv4Endpoint, Int32)
+        case bind(RakNetEndpoint, Int32)
         case configure(Int32)
         case address(Int32)
         case receive(Int32)
@@ -24,20 +24,28 @@ package final class UDPSocket: Sendable {
     }
 
     private let handle: SocketHandle
-    package let localAddress: IPv4Endpoint
+    package let localAddress: RakNetEndpoint
 
-    package init(bindTo endpoint: IPv4Endpoint, receiveTimeout: UInt32 = 100) throws {
+    package convenience init(bindTo endpoint: IPv4Endpoint, receiveTimeout: UInt32 = 100) throws {
+        try self.init(bindTo: .ipv4(endpoint), receiveTimeout: receiveTimeout)
+    }
+
+    package init(bindTo endpoint: RakNetEndpoint, receiveTimeout: UInt32 = 100) throws {
+        let family: Int32 = switch endpoint {
+        case .ipv4: AF_INET
+        case .ipv6: AF_INET6
+        }
         #if os(Windows)
         var data = WSADATA()
         let startup = WSAStartup(0x0202, &data)
         guard startup == 0 else { throw SocketError.startup(startup) }
-        let handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP.rawValue)
+        let handle = socket(family, SOCK_DGRAM, IPPROTO_UDP.rawValue)
         let invalidHandle = SocketHandle.max
         #elseif os(Linux)
-        let handle = socket(AF_INET, Int32(SOCK_DGRAM.rawValue), Int32(IPPROTO_UDP))
+        let handle = socket(family, Int32(SOCK_DGRAM.rawValue), Int32(IPPROTO_UDP))
         let invalidHandle: SocketHandle = -1
         #else
-        let handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        let handle = socket(family, SOCK_DGRAM, IPPROTO_UDP)
         let invalidHandle: SocketHandle = -1
         #endif
 
@@ -49,11 +57,13 @@ package final class UDPSocket: Sendable {
             throw SocketError.create(error)
         }
 
-        var address = Self.socketAddress(for: endpoint)
-        let size = AddressLength(MemoryLayout<sockaddr_in>.size)
-        let result = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(handle, $0, size) }
+        if case .ipv6 = endpoint, Self.setIPv6Only(handle) != 0 {
+            let error = Self.lastError
+            Self.close(handle)
+            throw SocketError.configure(error)
         }
+
+        let result = Self.withSocketAddress(for: endpoint) { bind(handle, $0, $1) }
         guard result == 0 else {
             let error = Self.lastError
             Self.close(handle)
@@ -76,31 +86,40 @@ package final class UDPSocket: Sendable {
             Self.close(handle)
             throw SocketError.configure(error)
         }
-        var boundLength = size
+        var address = sockaddr_storage()
+        var boundLength = AddressLength(MemoryLayout<sockaddr_storage>.size)
         let bound = withUnsafeMutablePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(handle, $0, &boundLength) }
         }
-        guard bound == 0 else {
+        guard bound == 0, let localAddress = Self.endpoint(for: &address, length: boundLength) else {
             let error = Self.lastError
             Self.close(handle)
             throw SocketError.address(error)
         }
         self.handle = handle
-        localAddress = Self.endpoint(for: address)
+        self.localAddress = localAddress
     }
 
-    convenience init(clientFor endpoint: IPv4Endpoint) throws {
-        let address: UInt32 = endpoint.address & 0xff000000 == 0x7f000000 ? 0x7f000001 : 0
-        try self.init(bindTo: IPv4Endpoint(address: address, port: 0), receiveTimeout: 20)
+    convenience init(clientFor endpoint: RakNetEndpoint) throws {
+        let binding: RakNetEndpoint
+        switch endpoint {
+        case let .ipv4(endpoint):
+            let address: UInt32 = endpoint.address & 0xff000000 == 0x7f000000 ? 0x7f000001 : 0
+            binding = .ipv4(IPv4Endpoint(address: address, port: 0))
+        case let .ipv6(endpoint):
+            let loopback = endpoint.addressHigh == 0 && endpoint.addressLow == 1
+            binding = .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: loopback ? 1 : 0, port: 0))
+        }
+        try self.init(bindTo: binding, receiveTimeout: 20)
     }
 
     deinit {
         Self.close(handle)
     }
 
-    package func receive(into buffer: inout [UInt8]) throws -> (bytes: [UInt8], sender: IPv4Endpoint)? {
-        var address = sockaddr_in()
-        var size = AddressLength(MemoryLayout<sockaddr_in>.size)
+    package func receive(into buffer: inout [UInt8]) throws -> (bytes: [UInt8], sender: RakNetEndpoint)? {
+        var address = sockaddr_storage()
+        var size = AddressLength(MemoryLayout<sockaddr_storage>.size)
         let count = withUnsafeMutablePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
                 buffer.withUnsafeMutableBytes { bytes in
@@ -126,24 +145,21 @@ package final class UDPSocket: Sendable {
             throw SocketError.receive(error)
         }
 
-        return (Array(buffer.prefix(count)), Self.endpoint(for: address))
+        guard let sender = Self.endpoint(for: &address, length: size) else { return nil }
+        return (Array(buffer.prefix(count)), sender)
     }
 
-    package func send(_ datagram: [UInt8], to endpoint: IPv4Endpoint) throws {
-        var address = Self.socketAddress(for: endpoint)
-        let size = AddressLength(MemoryLayout<sockaddr_in>.size)
-        let count = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
-                datagram.withUnsafeBytes { bytes in
-                    #if os(Windows)
-                    return Int(sendto(
-                        handle, bytes.baseAddress?.assumingMemoryBound(to: CChar.self),
-                        Int32(bytes.count), 0, address, size
-                    ))
-                    #else
-                    return sendto(handle, bytes.baseAddress, bytes.count, 0, address, size)
-                    #endif
-                }
+    package func send(_ datagram: [UInt8], to endpoint: RakNetEndpoint) throws {
+        let count = Self.withSocketAddress(for: endpoint) { address, size in
+            datagram.withUnsafeBytes { bytes in
+                #if os(Windows)
+                return Int(sendto(
+                    handle, bytes.baseAddress?.assumingMemoryBound(to: CChar.self),
+                    Int32(bytes.count), 0, address, size
+                ))
+                #else
+                return sendto(handle, bytes.baseAddress, bytes.count, 0, address, size)
+                #endif
             }
         }
         if count < 0 {
@@ -157,22 +173,82 @@ package final class UDPSocket: Sendable {
         }
     }
 
-    private static func endpoint(for address: sockaddr_in) -> IPv4Endpoint {
-        IPv4Endpoint(
-            address: UInt32(bigEndian: address.sin_addr.networkAddress),
-            port: UInt16(bigEndian: address.sin_port)
-        )
+    private static func endpoint(for storage: inout sockaddr_storage, length: AddressLength) -> RakNetEndpoint? {
+        switch Int32(storage.ss_family) {
+        case AF_INET where length >= MemoryLayout<sockaddr_in>.size:
+            return withUnsafePointer(to: &storage) {
+                $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    let address = $0.pointee
+                    return .ipv4(IPv4Endpoint(
+                        address: UInt32(bigEndian: address.sin_addr.networkAddress),
+                        port: UInt16(bigEndian: address.sin_port)
+                    ))
+                }
+            }
+        case AF_INET6 where length >= MemoryLayout<sockaddr_in6>.size:
+            return withUnsafePointer(to: &storage) {
+                $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+                    let address = $0.pointee
+                    return withUnsafeBytes(of: address.sin6_addr) { bytes in
+                        .ipv6(IPv6Endpoint(
+                            addressHigh: UInt64(wireBytes: bytes.prefix(8)),
+                            addressLow: UInt64(wireBytes: bytes.dropFirst(8).prefix(8)),
+                            port: UInt16(bigEndian: address.sin6_port),
+                            scopeID: address.sin6_scope_id
+                        ))
+                    }
+                }
+            }
+        default:
+            return nil
+        }
     }
 
-    private static func socketAddress(for endpoint: IPv4Endpoint) -> sockaddr_in {
-        var address = sockaddr_in()
-        #if canImport(Darwin)
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        #endif
-        address.sin_family = UInt16(AF_INET)
-        address.sin_port = endpoint.port.bigEndian
-        address.sin_addr.networkAddress = endpoint.address.bigEndian
-        return address
+    private static func withSocketAddress<T>(
+        for endpoint: RakNetEndpoint, _ operation: (UnsafePointer<sockaddr>, AddressLength) -> T
+    ) -> T {
+        switch endpoint {
+        case let .ipv4(endpoint):
+            var address = sockaddr_in()
+            #if canImport(Darwin)
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            #endif
+            address.sin_family = numericCast(AF_INET)
+            address.sin_port = endpoint.port.bigEndian
+            address.sin_addr.networkAddress = endpoint.address.bigEndian
+            return withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    operation($0, AddressLength(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        case let .ipv6(endpoint):
+            var address = sockaddr_in6()
+            #if canImport(Darwin)
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            #endif
+            address.sin6_family = numericCast(AF_INET6)
+            address.sin6_port = endpoint.port.bigEndian
+            address.sin6_scope_id = endpoint.scopeID
+            withUnsafeMutableBytes(of: &address.sin6_addr) {
+                $0.copyBytes(from: bigEndianBytes(endpoint.addressHigh) + bigEndianBytes(endpoint.addressLow))
+            }
+            return withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    operation($0, AddressLength(MemoryLayout<sockaddr_in6>.size))
+                }
+            }
+        }
+    }
+
+    private static func setIPv6Only(_ handle: SocketHandle) -> Int32 {
+        var enabled: Int32 = 1
+        return withUnsafeBytes(of: &enabled) {
+            #if os(Windows)
+            setsockopt(handle, IPPROTO_IPV6.rawValue, IPV6_V6ONLY, $0.baseAddress?.assumingMemoryBound(to: CChar.self), Int32($0.count))
+            #else
+            setsockopt(handle, Int32(IPPROTO_IPV6), IPV6_V6ONLY, $0.baseAddress, socklen_t($0.count))
+            #endif
+        }
     }
 
     private static var lastError: Int32 {

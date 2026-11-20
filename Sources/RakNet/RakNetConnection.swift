@@ -11,8 +11,8 @@ public enum RakNetTransportError: Error, Equatable {
 }
 
 public final class RakNetConnection: Sendable {
-    public let localAddress: IPv4Endpoint
-    public let remoteAddress: IPv4Endpoint
+    public let localAddress: RakNetEndpoint
+    public let remoteAddress: RakNetEndpoint
     public let mtu: UInt16
 
     private let key: TransportPeerKey
@@ -21,7 +21,7 @@ public final class RakNetConnection: Sendable {
     private let metrics: TransportMetrics
 
     init(
-        localAddress: IPv4Endpoint, key: TransportPeerKey, mtu: UInt16,
+        localAddress: RakNetEndpoint, key: TransportPeerKey, mtu: UInt16,
         messages: TransportInbox<[UInt8]>, commands: TransportCommands, metrics: TransportMetrics
     ) {
         self.localAddress = localAddress
@@ -78,7 +78,7 @@ final class TransportMetrics: @unchecked Sendable {
 }
 
 struct TransportPeerKey: Equatable, Sendable {
-    let address: IPv4Endpoint
+    let address: RakNetEndpoint
     let generation: UInt64
 }
 

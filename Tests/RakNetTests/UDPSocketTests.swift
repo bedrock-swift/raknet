@@ -5,7 +5,7 @@ import Testing
     let loopback = IPv4Endpoint(address: 0x7f000001, port: 0)
     let sender = try UDPSocket(bindTo: loopback)
     let receiver = try UDPSocket(bindTo: loopback)
-    #expect(receiver.localAddress.address == loopback.address)
+    #expect(receiver.localAddress == .ipv4(IPv4Endpoint(address: loopback.address, port: receiver.localAddress.port)))
     #expect(receiver.localAddress.port != 0)
     #expect(sender.localAddress.port != receiver.localAddress.port)
 

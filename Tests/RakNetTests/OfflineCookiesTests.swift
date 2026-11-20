@@ -2,8 +2,8 @@
 import Testing
 
 @Test func offlineCookiesReuseChallengesAndExpire() throws {
-    let first = IPv4Endpoint(address: 0x7f000001, port: 10001)
-    let second = IPv4Endpoint(address: 0x7f000001, port: 10002)
+    let first = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 10001))
+    let second = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 10002))
     var cookies = OfflineCookies(maximumPending: 1, lifetime: 5)
     let issued = cookies.issue(to: first, at: 10)
     let value = try #require(issued)

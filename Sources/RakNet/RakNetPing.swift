@@ -8,8 +8,13 @@ public struct RakNetPong: Equatable, Sendable {
 
 public extension RakNetConnection {
     static func ping(_ address: IPv4Endpoint, timeout: Duration = .seconds(3)) async throws -> RakNetPong {
+        try await ping(.ipv4(address), timeout: timeout)
+    }
+
+    static func ping(_ endpoint: RakNetEndpoint, timeout: Duration = .seconds(3)) async throws -> RakNetPong {
         try Task.checkCancellation()
-        guard address.address != 0, address.port != 0 else {
+        let address = endpoint.socketPeer
+        guard !address.isUnspecified, address.port != 0 else {
             throw RakNetTransportError.invalidRemoteAddress
         }
         guard timeout > .zero else { throw RakNetTransportError.timedOut }
@@ -37,7 +42,7 @@ public extension RakNetConnection {
 
 enum PingExchange {
     static func run(
-        to address: IPv4Endpoint, socket: UDPSocket, timeout: Duration, result: TransportInbox<RakNetPong>
+        to address: RakNetEndpoint, socket: UDPSocket, timeout: Duration, result: TransportInbox<RakNetPong>
     ) throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         let guid = Int64.random(in: Int64.min ... -1)

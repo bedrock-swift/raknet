@@ -2,7 +2,7 @@ import Dispatch
 import Foundation
 
 public final class RakNetListener: Sendable {
-    public let localAddress: IPv4Endpoint
+    public let localAddress: RakNetEndpoint
 
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
@@ -16,7 +16,9 @@ public final class RakNetListener: Sendable {
         let commands = TransportCommands()
         self.accepted = accepted
         self.commands = commands
-        let advertisement = TransportAdvertisement(encoded: server.advertisement, maximumMTU: maximumMTU)
+        let advertisement = TransportAdvertisement(
+            encoded: server.advertisement, maximumMTU: maximumMTU, udpOverhead: socket.localAddress.udpOverhead
+        )
         self.advertisement = advertisement
 
         TransportDriver.launch(
@@ -30,12 +32,28 @@ public final class RakNetListener: Sendable {
         on address: IPv4Endpoint,
         guid: UInt64 = .random(in: 1...UInt64(Int64.max)),
         advertisement: [UInt8] = [],
-        maximumMTU: UInt16 = IPv4MTU.defaultValue,
+        maximumMTU: UInt16 = RakNetMTU.defaultValue,
+        maximumConnections: Int = 128,
+        useCookies: Bool = true
+    ) throws -> RakNetListener {
+        try listen(
+            on: .ipv4(address), guid: guid, advertisement: advertisement, maximumMTU: maximumMTU,
+            maximumConnections: maximumConnections, useCookies: useCookies
+        )
+    }
+
+    public static func listen(
+        on address: RakNetEndpoint,
+        guid: UInt64 = .random(in: 1...UInt64(Int64.max)),
+        advertisement: [UInt8] = [],
+        maximumMTU: UInt16 = RakNetMTU.defaultValue,
         maximumConnections: Int = 128,
         useCookies: Bool = true
     ) throws -> RakNetListener {
         guard (1...4096).contains(maximumConnections) else { throw RakNetTransportError.invalidConnectionLimit }
-        let server = try OfflineServer(guid: guid, advertisement: advertisement, maximumMTU: maximumMTU)
+        let server = try OfflineServer(
+            guid: guid, advertisement: advertisement, maximumMTU: maximumMTU, udpOverhead: address.udpOverhead
+        )
         let socket = try UDPSocket(bindTo: address, receiveTimeout: 20)
         return RakNetListener(
             socket: socket, server: server, maximumMTU: maximumMTU,
@@ -47,7 +65,7 @@ public final class RakNetListener: Sendable {
         try advertisement.set(data)
     }
 
-    public func setAdvertisementProvider(_ provider: (@Sendable (IPv4Endpoint) -> [UInt8])?) {
+    public func setAdvertisementProvider(_ provider: (@Sendable (RakNetEndpoint) -> [UInt8])?) {
         advertisement.setProvider(provider)
     }
 
@@ -68,34 +86,37 @@ public final class RakNetListener: Sendable {
 final class TransportAdvertisement: @unchecked Sendable {
     private let lock = NSLock()
     private let maximumMTU: UInt16
+    private let udpOverhead: Int
     private var encoded: [UInt8]
-    private var provider: (@Sendable (IPv4Endpoint) -> [UInt8])?
+    private var provider: (@Sendable (RakNetEndpoint) -> [UInt8])?
 
-    init(encoded: [UInt8], maximumMTU: UInt16) {
+    init(encoded: [UInt8], maximumMTU: UInt16, udpOverhead: Int) {
         self.encoded = encoded
         self.maximumMTU = maximumMTU
+        self.udpOverhead = udpOverhead
     }
 
     func set(_ data: [UInt8]) throws {
-        let value = try OfflineServer.encodeAdvertisement(data, maximumMTU: maximumMTU)
+        let value = try OfflineServer.encodeAdvertisement(data, maximumMTU: maximumMTU, udpOverhead: udpOverhead)
         lock.withLock { encoded = value }
     }
 
-    func setProvider(_ provider: (@Sendable (IPv4Endpoint) -> [UInt8])?) {
+    func setProvider(_ provider: (@Sendable (RakNetEndpoint) -> [UInt8])?) {
         lock.withLock { self.provider = provider }
     }
 
-    func data(for sender: IPv4Endpoint) -> [UInt8] {
+    func data(for sender: RakNetEndpoint) -> [UInt8] {
         let (provider, fallback) = lock.withLock { (provider, encoded) }
         guard let provider else { return fallback }
-        return (try? OfflineServer.encodeAdvertisement(provider(sender), maximumMTU: maximumMTU)) ?? fallback
+        let data = provider(sender)
+        return (try? OfflineServer.encodeAdvertisement(data, maximumMTU: maximumMTU, udpOverhead: udpOverhead)) ?? fallback
     }
 }
 
 struct TransportDriver {
     enum Role: Sendable {
         case listen(OfflineServer, TransportAdvertisement, maximumConnections: Int, useCookies: Bool)
-        case dial(IPv4Endpoint, mtu: UInt16, timeout: Duration)
+        case dial(RakNetEndpoint, mtu: UInt16, timeout: Duration)
     }
 
     static func launch(
@@ -129,7 +150,7 @@ struct TransportDriver {
     private let role: Role
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
-    private var peers: [IPv4Endpoint: Peer] = [:]
+    private var peers: [RakNetEndpoint: Peer] = [:]
     private var generation: UInt64 = 0
     private var cookies = OfflineCookies()
     private var dial: DialAttempt?
@@ -176,7 +197,7 @@ struct TransportDriver {
         }
     }
 
-    private mutating func receive(_ datagram: [UInt8], from address: IPv4Endpoint, at now: UInt64) throws {
+    private mutating func receive(_ datagram: [UInt8], from address: RakNetEndpoint, at now: UInt64) throws {
         if case let .listen(server, advertisement, maximumConnections, useCookies) = role,
            let response = offlineResponse(
                datagram, from: address, server: server, advertisement: advertisement, useCookies: useCookies, at: now
@@ -233,7 +254,7 @@ struct TransportDriver {
         dial = attempt
     }
 
-    private mutating func receiveDialReply(_ datagram: [UInt8], from address: IPv4Endpoint, at now: UInt64) throws {
+    private mutating func receiveDialReply(_ datagram: [UInt8], from address: RakNetEndpoint, at now: UInt64) throws {
         guard var attempt = dial, attempt.address == address else { return }
         let event = try attempt.receive(datagram, from: address, at: now)
         dial = attempt
@@ -253,7 +274,7 @@ struct TransportDriver {
     }
 
     private mutating func offlineResponse(
-        _ datagram: [UInt8], from address: IPv4Endpoint, server: OfflineServer,
+        _ datagram: [UInt8], from address: RakNetEndpoint, server: OfflineServer,
         advertisement: TransportAdvertisement, useCookies: Bool, at now: UInt64
     ) -> OfflineServer.Response? {
         switch datagram.first {
@@ -271,7 +292,7 @@ struct TransportDriver {
     }
 
     private mutating func handleOffline(
-        _ response: OfflineServer.Response, from address: IPv4Endpoint, at now: UInt64, maximumConnections: Int
+        _ response: OfflineServer.Response, from address: RakNetEndpoint, at now: UInt64, maximumConnections: Int
     ) {
         do {
             if let negotiation = response.negotiation, peers[address] == nil {
@@ -329,11 +350,11 @@ struct TransportDriver {
         }
     }
 
-    private mutating func remove(_ address: IPv4Endpoint, failure: (any Error)? = nil) {
+    private mutating func remove(_ address: RakNetEndpoint, failure: (any Error)? = nil) {
         peers.removeValue(forKey: address)?.messages.finish(failure)
     }
 
-    private func send(_ packets: [[UInt8]], to address: IPv4Endpoint) throws {
+    private func send(_ packets: [[UInt8]], to address: RakNetEndpoint) throws {
         for packet in packets { try socket.send(packet, to: address) }
     }
 }

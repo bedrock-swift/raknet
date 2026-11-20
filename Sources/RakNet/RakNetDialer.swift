@@ -1,11 +1,18 @@
 public extension RakNetConnection {
     static func dial(
-        _ address: IPv4Endpoint,
-        mtu: UInt16 = IPv4MTU.defaultValue,
+        _ address: IPv4Endpoint, mtu: UInt16 = RakNetMTU.defaultValue, timeout: Duration = .seconds(5)
+    ) async throws -> RakNetConnection {
+        try await dial(.ipv4(address), mtu: mtu, timeout: timeout)
+    }
+
+    static func dial(
+        _ endpoint: RakNetEndpoint,
+        mtu: UInt16 = RakNetMTU.defaultValue,
         timeout: Duration = .seconds(5)
     ) async throws -> RakNetConnection {
         try Task.checkCancellation()
-        guard address.address != 0, address.port != 0 else {
+        let address = endpoint.socketPeer
+        guard !address.isUnspecified, address.port != 0 else {
             throw RakNetTransportError.invalidRemoteAddress
         }
         guard OfflineWire.mtuRange.contains(mtu) else { throw OfflineClient.HandshakeError.invalidMTU }
@@ -31,7 +38,7 @@ public extension RakNetConnection {
 }
 
 struct DialAttempt {
-    let address: IPv4Endpoint
+    let address: RakNetEndpoint
     let timeout: Duration
     private let started = ContinuousClock.now
     private let sizes: [UInt16]
@@ -40,7 +47,7 @@ struct DialAttempt {
     private var probes = 0
     private var nextSend: UInt64 = 0
 
-    init(address: IPv4Endpoint, mtu: UInt16, timeout: Duration) {
+    init(address: RakNetEndpoint, mtu: UInt16, timeout: Duration) {
         self.address = address
         self.timeout = timeout
         sizes = [mtu] + [UInt16(1200), 576].filter { $0 < mtu }
@@ -61,7 +68,7 @@ struct DialAttempt {
         return probe
     }
 
-    mutating func receive(_ datagram: [UInt8], from sender: IPv4Endpoint, at now: UInt64) throws -> OfflineClient.Event? {
+    mutating func receive(_ datagram: [UInt8], from sender: RakNetEndpoint, at now: UInt64) throws -> OfflineClient.Event? {
         let event = try client.receive(datagram, from: sender)
         if case .send = event { nextSend = now + 300 }
         return event

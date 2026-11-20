@@ -2,8 +2,10 @@ import Dispatch
 @testable import RakNet
 import Testing
 
-@Test func pingReportsAdvertisementAndLatency() async throws {
-    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+@Test(arguments: [false, true]) func pingReportsAdvertisementAndLatency(useIPv6: Bool) async throws {
+    let endpoint: RakNetEndpoint = useIPv6
+        ? .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 0))
+        : .ipv4(IPv4Endpoint(address: 0x7f000001, port: 0))
     let advertisement: [UInt8] = [0x4d, 0x43, 0x50, 0x45, 0x00, 0xff]
     let listener = try RakNetListener.listen(on: endpoint, guid: 42, advertisement: advertisement)
     defer { listener.close() }
@@ -39,7 +41,7 @@ import Testing
     let silent = try UDPSocket(bindTo: endpoint, receiveTimeout: 500)
     let pending = Task { try await RakNetConnection.ping(silent.localAddress) }
     defer { pending.cancel() }
-    let request: (bytes: [UInt8], sender: IPv4Endpoint)? = try await withCheckedThrowingContinuation { continuation in
+    let request: (bytes: [UInt8], sender: RakNetEndpoint)? = try await withCheckedThrowingContinuation { continuation in
         DispatchQueue.global().async {
             var bytes = [UInt8](repeating: 0, count: 64)
             continuation.resume(with: Result { try silent.receive(into: &bytes) })
@@ -62,7 +64,10 @@ import Testing
     let updated = try await RakNetConnection.ping(listener.localAddress)
     #expect(updated.advertisement == [2])
 
-    listener.setAdvertisementProvider { address in bigEndianBytes(address.address) }
+    listener.setAdvertisementProvider { address in
+        guard case let .ipv4(endpoint) = address else { return [] }
+        return bigEndianBytes(endpoint.address)
+    }
     let generated = try await RakNetConnection.ping(listener.localAddress)
     #expect(generated.advertisement == [0x7f, 0, 0, 1])
 

@@ -23,19 +23,30 @@ public struct OfflineServer: Sendable {
         guid: UInt64,
         advertisement: [UInt8],
         protocolVersion: UInt8 = 11,
-        maximumMTU: UInt16 = IPv4MTU.defaultValue
+        maximumMTU: UInt16 = RakNetMTU.defaultValue
+    ) throws {
+        try self.init(
+            guid: guid, advertisement: advertisement, protocolVersion: protocolVersion,
+            maximumMTU: maximumMTU, udpOverhead: OfflineWire.ipv4UDPOverhead
+        )
+    }
+
+    init(
+        guid: UInt64, advertisement: [UInt8], protocolVersion: UInt8 = 11, maximumMTU: UInt16, udpOverhead: Int
     ) throws {
         guard OfflineWire.mtuRange.contains(maximumMTU) else {
             throw ConfigurationError.invalidMTU
         }
         self.guid = bigEndianBytes(guid)
-        self.advertisement = try Self.encodeAdvertisement(advertisement, maximumMTU: maximumMTU)
+        self.advertisement = try Self.encodeAdvertisement(advertisement, maximumMTU: maximumMTU, udpOverhead: udpOverhead)
         self.protocolVersion = protocolVersion
         self.maximumMTU = maximumMTU
     }
 
-    static func encodeAdvertisement(_ advertisement: [UInt8], maximumMTU: UInt16) throws -> [UInt8] {
-        guard advertisement.count <= Int(maximumMTU) - OfflineWire.ipv4UDPOverhead - 35 else {
+    static func encodeAdvertisement(
+        _ advertisement: [UInt8], maximumMTU: UInt16, udpOverhead: Int
+    ) throws -> [UInt8] {
+        guard advertisement.count <= Int(maximumMTU) - udpOverhead - 35 else {
             throw ConfigurationError.advertisementTooLong
         }
         return bigEndianBytes(UInt16(advertisement.count)) + advertisement
@@ -55,13 +66,6 @@ public struct OfflineServer: Sendable {
 
     public func receive(_ datagram: [UInt8], from sender: RakNetEndpoint) -> Response? {
         receive(datagram, from: sender, cookie: nil)
-    }
-
-    func receive(
-        _ datagram: [UInt8], from sender: IPv4Endpoint, cookie: UInt32?,
-        advertisement override: (() -> [UInt8])? = nil
-    ) -> Response? {
-        receive(datagram, from: .ipv4(sender), cookie: cookie, advertisement: override)
     }
 
     func receive(
@@ -117,9 +121,11 @@ func bigEndianBytes<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
     withUnsafeBytes(of: value.bigEndian) { Array($0) }
 }
 
-public enum IPv4MTU {
+public enum RakNetMTU {
     public static let defaultValue: UInt16 = 1440
 }
+
+public typealias IPv4MTU = RakNetMTU
 
 enum OfflineWire {
     static let openRequestOne: UInt8 = 0x05

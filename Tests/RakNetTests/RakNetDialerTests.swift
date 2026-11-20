@@ -1,12 +1,21 @@
 @testable import RakNet
 import Testing
 
-@Test(.timeLimit(.minutes(1))) func dialExchangesPayloadAndCloses() async throws {
-    let address = IPv4Endpoint(address: 0x7f000001, port: 0)
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func dialExchangesPayloadAndCloses(useIPv6: Bool) async throws {
+    let address: RakNetEndpoint = useIPv6
+        ? .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 0))
+        : .ipv4(IPv4Endpoint(address: 0x7f000001, port: 0))
     let listener = try RakNetListener.listen(on: address)
     defer { listener.close() }
 
-    let client = try await RakNetConnection.dial(listener.localAddress)
+    let remote: RakNetEndpoint
+    if case let .ipv6(endpoint) = listener.localAddress {
+        remote = .ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: endpoint.port, flowInfo: 1))
+    } else {
+        remote = listener.localAddress
+    }
+    let client = try await RakNetConnection.dial(remote)
     let incoming = try await expectWithin("accept") { try await listener.accept() }
     let server = try #require(incoming)
     #expect(client.remoteAddress == listener.localAddress)
@@ -40,7 +49,7 @@ import Testing
 
 @Test func dialDropsProbeSizeAfterThreeUnansweredAttempts() throws {
     let server = IPv4Endpoint(address: 0x7f000001, port: 19132)
-    var attempt = DialAttempt(address: server, mtu: 1440, timeout: .seconds(5))
+    var attempt = DialAttempt(address: .ipv4(server), mtu: 1440, timeout: .seconds(5))
     for time in [UInt64(0), 300, 600] {
         let packet = try attempt.scheduledPacket(at: time)
         #expect(packet?.count == 1412)

@@ -45,7 +45,7 @@ public struct OfflineClient: Sendable {
         self.protocolVersion = protocolVersion
     }
 
-    public mutating func probe(mtu: UInt16 = IPv4MTU.defaultValue) throws -> [UInt8] {
+    public mutating func probe(mtu: UInt16 = RakNetMTU.defaultValue) throws -> [UInt8] {
         guard OfflineWire.mtuRange.contains(mtu) else { throw HandshakeError.invalidMTU }
         state = .probing(mtu)
         var probe = [0x05] + OfflineWire.magic + [protocolVersion]
