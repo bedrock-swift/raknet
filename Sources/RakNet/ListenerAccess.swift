@@ -121,13 +121,13 @@ struct ConnectionQuota: Sendable {
         self.perIP = perIP
     }
 
+    func hasCapacity(for endpoint: RakNetEndpoint) -> Bool {
+        total < maximum && (perIP.map { byHost[ListenerHost(endpoint), default: 0] < $0 } ?? true)
+    }
+
     mutating func reserve(_ endpoint: RakNetEndpoint) throws {
-        guard total < maximum else { throw RakNetTransportError.connectionLimitReached }
-        if let perIP {
-            let host = ListenerHost(endpoint)
-            guard byHost[host, default: 0] < perIP else { throw RakNetTransportError.connectionLimitReached }
-            byHost[host, default: 0] += 1
-        }
+        guard hasCapacity(for: endpoint) else { throw RakNetTransportError.connectionLimitReached }
+        if perIP != nil { byHost[ListenerHost(endpoint), default: 0] += 1 }
         total += 1
     }
 
@@ -136,6 +136,50 @@ struct ConnectionQuota: Sendable {
         let host = ListenerHost(endpoint)
         if let count = byHost[host] {
             byHost[host] = count > 1 ? count - 1 : nil
+        }
+    }
+}
+
+public struct RakNetPendingConnectionLimits: Equatable, Sendable {
+    public let total: Int
+    public let perIP: Int?
+
+    public init(total: Int = 64, perIP: Int? = 8) {
+        self.total = total
+        self.perIP = perIP
+    }
+}
+
+struct ConnectionAdmission: Sendable {
+    private var live: ConnectionQuota
+    private var pending: ConnectionQuota
+
+    var maximum: Int { live.maximum }
+
+    init(maximum: Int, perIP: Int?, pending: RakNetPendingConnectionLimits) throws {
+        live = try ConnectionQuota(maximum: maximum, perIP: perIP)
+        self.pending = try ConnectionQuota(maximum: pending.total, perIP: pending.perIP)
+    }
+
+    mutating func reserve(_ endpoint: RakNetEndpoint, established: Bool) throws {
+        if established {
+            try live.reserve(endpoint)
+        } else {
+            guard live.hasCapacity(for: endpoint) else { throw RakNetTransportError.connectionLimitReached }
+            try pending.reserve(endpoint)
+        }
+    }
+
+    mutating func promote(_ endpoint: RakNetEndpoint) throws {
+        try live.reserve(endpoint)
+        pending.release(endpoint)
+    }
+
+    mutating func release(_ endpoint: RakNetEndpoint, established: Bool) {
+        if established {
+            live.release(endpoint)
+        } else {
+            pending.release(endpoint)
         }
     }
 }

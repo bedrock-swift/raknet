@@ -154,6 +154,13 @@ public struct OnlineConnection: Sendable {
         )
     }
 
+    mutating func abort() -> [UInt8]? {
+        guard state == .open || state == .closing else { return nil }
+        let packet = session.sendControl([0x15])
+        state = .closed
+        return packet
+    }
+
     public mutating func close(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard isOpen else { throw ConnectionError.invalidState }
         let packets = try session.send([0x15], at: sessionTime(milliseconds))

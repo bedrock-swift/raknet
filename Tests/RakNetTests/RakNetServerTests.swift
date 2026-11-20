@@ -92,3 +92,30 @@ private func simulateClient(
     #expect(blocked.datagrams.isEmpty)
     #expect(resumed.datagrams.count == 1)
 }
+
+@Test func pendingHandshakeDoesNotConsumeEstablishedCapacity() throws {
+    let endpoint = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 19132))
+    let stalled = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50001))
+    let sameHost = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50002))
+    let otherHost = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000002, port: 50003))
+    let offline = try OfflineServer(guid: 42, advertisement: [])
+    var server = try RakNetServer(
+        on: endpoint, server: offline, maximumConnections: 1,
+        pendingConnections: RakNetPendingConnectionLimits(total: 2, perIP: 1), useCookies: false
+    )
+    var opening = OfflineClient(server: endpoint, guid: -10)
+    let probe = try opening.probe()
+    let offered = server.receive(probe, from: stalled, at: 0)
+    let reply = try #require(offered.datagrams.first)
+    guard case let .send(request) = try opening.receive(reply.bytes, from: endpoint) else {
+        Issue.record("missing request")
+        return
+    }
+
+    let pending = server.receive(request, from: stalled, at: 1)
+    #expect(pending.datagrams.count == 1)
+    let same = server.receive(request, from: sameHost, at: 2)
+    #expect(same.datagrams.isEmpty)
+    let connected = try simulateClient(otherHost, connectingTo: endpoint, server: &server, at: 4)
+    #expect(connected.isOpen)
+}

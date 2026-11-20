@@ -18,6 +18,7 @@ public struct RakNetServer: Sendable {
     private struct Peer: Sendable {
         let mtu: UInt16
         var connection: OnlineConnection
+        var established: Bool
         var lastPacket: UInt64
         var nextPing: UInt64
         var onlineRate: OnlinePacketRate?
@@ -25,7 +26,7 @@ public struct RakNetServer: Sendable {
 
     public let localAddress: RakNetEndpoint
     private let onlinePacketsPerSecond: UInt32?
-    private var quota: ConnectionQuota
+    private var quota: ConnectionAdmission
     private var offlineRate: OfflinePacketRate?
     private var temporaryBlocks: [ListenerHost: UInt64] = [:]
     private var handshake: OfflineServerHandshake
@@ -33,11 +34,12 @@ public struct RakNetServer: Sendable {
 
     public init(
         on address: RakNetEndpoint, server: OfflineServer, maximumConnections: Int = 128,
-        maximumConnectionsPerIP: Int? = nil, useCookies: Bool = true,
+        maximumConnectionsPerIP: Int? = nil, pendingConnections: RakNetPendingConnectionLimits = .init(),
+        useCookies: Bool = true,
         offlinePacketLimits: RakNetOfflinePacketLimits? = .init(), onlinePacketsPerSecond: UInt32? = 10_000
     ) throws {
         localAddress = address
-        quota = try ConnectionQuota(maximum: maximumConnections, perIP: maximumConnectionsPerIP)
+        quota = try ConnectionAdmission(maximum: maximumConnections, perIP: maximumConnectionsPerIP, pending: pendingConnections)
         offlineRate = offlinePacketLimits.map { OfflinePacketRate(limits: $0) }
         self.onlinePacketsPerSecond = onlinePacketsPerSecond
         handshake = OfflineServerHandshake(server: server, useCookies: useCookies)
@@ -77,20 +79,25 @@ public struct RakNetServer: Sendable {
 
         do {
             let input = try peer.connection.receive(datagram, from: address, at: time)
+            if input.opened {
+                try quota.promote(address)
+                peer.established = true
+            }
             peer.lastPacket = time
             var output = Output(datagrams: Self.datagrams(input.replies, to: address))
             if input.opened { output.events.append(.connected(address, mtu: peer.mtu)) }
             output.events += input.payloads.map { .payload(address, $0) }
             if input.closed {
-                quota.release(address)
+                quota.release(address, established: peer.established)
                 output.events.append(.disconnected(address))
             } else {
                 peers[address] = peer
             }
             return output
         } catch {
-            quota.release(address)
-            return Output(events: [.disconnected(address)])
+            quota.release(address, established: peer.established)
+            let packet = peer.connection.abort().map { Datagram(destination: address, bytes: $0) }
+            return Output(datagrams: packet.map { [$0] } ?? [], events: [.disconnected(address)])
         }
     }
 
@@ -101,7 +108,7 @@ public struct RakNetServer: Sendable {
             guard var peer = peers.removeValue(forKey: address) else { continue }
             let timeout: UInt64 = peer.connection.isOpen ? 15_000 : 5_000
             if time >= peer.lastPacket, time - peer.lastPacket >= timeout {
-                quota.release(address)
+                quota.release(address, established: peer.established)
                 output.events.append(.disconnected(address))
                 continue
             }
@@ -114,7 +121,7 @@ public struct RakNetServer: Sendable {
                 }
                 peers[address] = peer
             } catch {
-                quota.release(address)
+                quota.release(address, established: peer.established)
                 output.events.append(.disconnected(address))
             }
         }
@@ -182,9 +189,9 @@ public struct RakNetServer: Sendable {
     }
 
     private mutating func install(_ connection: OnlineConnection, mtu: UInt16, at time: UInt64) throws {
-        try quota.reserve(connection.peer)
+        try quota.reserve(connection.peer, established: connection.isOpen)
         peers[connection.peer] = Peer(
-            mtu: mtu, connection: connection, lastPacket: time, nextPing: time + min(2_000, UInt64.max - time),
+            mtu: mtu, connection: connection, established: connection.isOpen, lastPacket: time, nextPing: time + min(2_000, UInt64.max - time),
             onlineRate: onlinePacketsPerSecond.map { OnlinePacketRate(packetsPerSecond: $0, at: time) }
         )
     }
