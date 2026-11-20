@@ -1,4 +1,4 @@
-import RakNet
+@testable import RakNet
 import Testing
 
 @Test func serverMultiplexesIndependentPeersWithoutSocketIO() throws {
@@ -133,4 +133,38 @@ private func simulateClient(
     #expect(!active.datagrams.contains { $0.bytes.count == 16 && $0.bytes[7] == 0 })
     let idle = server.update(at: 4_100)
     #expect(idle.datagrams.contains { $0.bytes.count == 16 && $0.bytes[7] == 0 })
+}
+
+@Test func listenerLimitsGroupIPv6AddressesByPrefix() throws {
+    let first = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0x2001_0db8_0000_0001, addressLow: 1, port: 2000))
+    let samePrefix = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0x2001_0db8_0000_0001, addressLow: 2, port: 2001))
+    let otherPrefix = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0x2001_0db8_0000_0002, addressLow: 1, port: 2000))
+
+    var rate = OfflinePacketRate(limits: RakNetOfflinePacketLimits(perIP: 1, total: 3))
+    let allowed = [first, samePrefix, otherPrefix].map { rate.allow($0, at: 0) }
+    #expect(allowed == [true, false, true])
+
+    var admission = try ConnectionAdmission(maximum: 3, perIP: 1, pending: .init(total: 3, perIP: 1))
+    try admission.reserve(first, established: false)
+    #expect(throws: RakNetTransportError.connectionLimitReached) { try admission.reserve(samePrefix, established: false) }
+    try admission.promote(first)
+    #expect(throws: RakNetTransportError.connectionLimitReached) { try admission.reserve(samePrefix, established: true) }
+    try admission.reserve(otherPrefix, established: true)
+
+    let access = ListenerAccess()
+    access.block(first, for: .seconds(10))
+    #expect(access.isBlocked(samePrefix))
+    #expect(!access.isBlocked(otherPrefix))
+    access.unblock(samePrefix)
+    #expect(!access.isBlocked(first))
+}
+
+@Test func listenerLimitsRecognizeIPv4MappedAddressesAndIPv6Scopes() {
+    let v4 = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f00_0001, port: 2000))
+    let mapped = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 0xffff_7f00_0001, port: 2001))
+    #expect(ListenerHost(v4) == ListenerHost(mapped))
+
+    let link = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0xfe80_0000_0000_0000, addressLow: 1, port: 2000, scopeID: 1))
+    let otherLink = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0xfe80_0000_0000_0000, addressLow: 1, port: 2000, scopeID: 2))
+    #expect(ListenerHost(link) != ListenerHost(otherLink))
 }

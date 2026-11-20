@@ -53,7 +53,7 @@ try await connection.close()
 Use `try await RakNetConnection.ping(address)` to read the server advertisement and round-trip time. Both `ping` and `dial` also accept a hostname or IP literal and a `port`.
 Use `listener.setAdvertisement(_:)` to update the advertisement or `listener.setAdvertisementProvider(_:)` to generate it per peer. If the provider returns an oversized advertisement, the listener uses the configured static bytes.
 
-Use `listener.block(_:for:)` and `listener.unblock(_:)` to control access by IP address. Set `offlinePacketLimits` to adjust the per-IP and listener-wide rates for discovery and offline handshakes. Set `pendingConnections` to cap unfinished handshakes separately. The defaults allow 64 pending handshakes in total and eight per IP. Set `maximumConnectionsPerIP` to limit established connections from one address and `onlinePacketsPerSecond` to cap the packet rate of each connection.
+Use `listener.block(_:for:)` and `listener.unblock(_:)` to control access by IPv4 address or IPv6 /64 prefix. Offline and connection limits use the same grouping. Set `offlinePacketLimits` to adjust the per-IP and listener-wide rates for discovery and offline handshakes. Set `pendingConnections` to cap unfinished handshakes separately. The defaults allow 64 pending handshakes in total and eight per address or prefix. Set `maximumConnectionsPerIP` to limit established connections from one address or prefix and `onlinePacketsPerSecond` to cap the packet rate of each connection.
 
 Read `connection.roundTripTime` for the smoothed RTT once a measurement is available.
 

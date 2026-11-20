@@ -42,12 +42,17 @@ final class ListenerAccess: @unchecked Sendable {
 
 enum ListenerHost: Hashable, Sendable {
     case ipv4(UInt32)
-    case ipv6(UInt64, UInt64, scopeID: UInt32)
+    case ipv6(prefix: UInt64, scopeID: UInt32)
 
     init(_ endpoint: RakNetEndpoint) {
         switch endpoint {
         case let .ipv4(address): self = .ipv4(address.address)
-        case let .ipv6(address): self = .ipv6(address.addressHigh, address.addressLow, scopeID: address.scopeID)
+        case let .ipv6(address):
+            if address.addressHigh == 0, address.addressLow >> 32 == 0xffff {
+                self = .ipv4(UInt32(truncatingIfNeeded: address.addressLow)) // ipv4 mapped address
+            } else {
+                self = .ipv6(prefix: address.addressHigh, scopeID: address.scopeID)
+            }
         }
     }
 }

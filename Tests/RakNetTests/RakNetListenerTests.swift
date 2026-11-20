@@ -46,7 +46,7 @@ import Testing
 @Test func temporaryBlocksExpireAndIgnoreThePort() {
     let first = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 2000))
     let second = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 2001))
-    let other = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 2, port: 2000))
+    let other = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0x2001_0db8_0000_0001, addressLow: 2, port: 2000))
     let now = ContinuousClock.now
     let access = ListenerAccess()
     access.block(first, for: .seconds(1), at: now)
