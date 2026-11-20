@@ -7,6 +7,7 @@ public final class RakNetListener: Sendable {
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
     private let advertisement: TransportAdvertisement
+    private let access = ListenerAccess()
 
     private init(
         socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16, maximumConnections: Int, useCookies: Bool
@@ -23,7 +24,10 @@ public final class RakNetListener: Sendable {
 
         TransportDriver.launch(
             socket: socket,
-            role: .listen(server, advertisement, maximumConnections: maximumConnections, useCookies: useCookies),
+            role: .listen(.init(
+                server: server, advertisement: advertisement, access: access,
+                maximumConnections: maximumConnections, useCookies: useCookies
+            )),
             accepted: accepted, commands: commands
         )
     }
@@ -67,6 +71,14 @@ public final class RakNetListener: Sendable {
 
     public func setAdvertisementProvider(_ provider: (@Sendable (RakNetEndpoint) -> [UInt8])?) {
         advertisement.setProvider(provider)
+    }
+
+    public func block(_ endpoint: RakNetEndpoint, for duration: Duration = .seconds(10)) {
+        access.block(endpoint, for: duration)
+    }
+
+    public func unblock(_ endpoint: RakNetEndpoint) {
+        access.unblock(endpoint)
     }
 
     public func accept() async throws -> RakNetConnection? {
@@ -114,8 +126,16 @@ final class TransportAdvertisement: @unchecked Sendable {
 }
 
 struct TransportDriver {
+    struct Listener: Sendable {
+        let server: OfflineServer
+        let advertisement: TransportAdvertisement
+        let access: ListenerAccess
+        let maximumConnections: Int
+        let useCookies: Bool
+    }
+
     enum Role: Sendable {
-        case listen(OfflineServer, TransportAdvertisement, maximumConnections: Int, useCookies: Bool)
+        case listen(Listener)
         case dial(RakNetEndpoint, mtu: UInt16, timeout: Duration)
     }
 
@@ -198,12 +218,12 @@ struct TransportDriver {
     }
 
     private mutating func receive(_ datagram: [UInt8], from address: RakNetEndpoint, at now: UInt64) throws {
-        if case let .listen(server, advertisement, maximumConnections, useCookies) = role,
-           let response = offlineResponse(
-               datagram, from: address, server: server, advertisement: advertisement, useCookies: useCookies, at: now
-           ) {
-            handleOffline(response, from: address, at: now, maximumConnections: maximumConnections)
-            return
+        if case let .listen(listener) = role {
+            guard !listener.access.isBlocked(address) else { return }
+            if let response = offlineResponse(datagram, from: address, listener: listener, at: now) {
+                handleOffline(response, from: address, at: now, maximumConnections: listener.maximumConnections)
+                return
+            }
         }
 
         guard let peer = peers[address] else {
@@ -274,20 +294,20 @@ struct TransportDriver {
     }
 
     private mutating func offlineResponse(
-        _ datagram: [UInt8], from address: RakNetEndpoint, server: OfflineServer,
-        advertisement: TransportAdvertisement, useCookies: Bool, at now: UInt64
+        _ datagram: [UInt8], from address: RakNetEndpoint, listener: Listener, at now: UInt64
     ) -> OfflineServer.Response? {
+        let server = listener.server
         switch datagram.first {
-        case OfflineWire.openRequestOne where useCookies:
+        case OfflineWire.openRequestOne where listener.useCookies:
             guard let response = server.receive(datagram, from: address) else { return nil }
             guard response.datagram.first == OfflineWire.openReplyOne else { return response }
             guard let cookie = cookies.issue(to: address, at: now) else { return nil }
             return server.receive(datagram, from: address, cookie: cookie)
-        case OfflineWire.openRequestTwo where useCookies:
+        case OfflineWire.openRequestTwo where listener.useCookies:
             guard let cookie = cookies.value(for: address, at: now) else { return nil }
             return server.receive(datagram, from: address, cookie: cookie)
         default:
-            return server.receive(datagram, from: address, cookie: nil) { advertisement.data(for: address) }
+            return server.receive(datagram, from: address, cookie: nil) { listener.advertisement.data(for: address) }
         }
     }
 
