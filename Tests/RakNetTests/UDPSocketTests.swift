@@ -1,4 +1,4 @@
-import RakNet
+@testable import RakNet
 import Testing
 
 @Test func udpSocketReportsBoundPortAndReceivesDatagram() throws {
@@ -17,4 +17,24 @@ import Testing
     let datagram = try #require(received)
     #expect(datagram.bytes == payload)
     #expect(datagram.sender == sender.localAddress)
+}
+
+@Test func commandsWakeAnIdleSocketAndCoalesceQueuedWork() throws {
+    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let receiver = try UDPSocket(bindTo: endpoint, receiveTimeout: 80)
+    let sender = try UDPSocket(bindTo: endpoint)
+    let commands = TransportCommands()
+    commands.installWake { try? sender.send([0], to: receiver.localAddress) }
+    let key = TransportPeerKey(address: receiver.localAddress, generation: 0)
+    var buffer = [UInt8](repeating: 0, count: 32)
+    commands.submit(.close(key, nil))
+    commands.submit(.close(key, nil))
+    let first = try receiver.receive(into: &buffer)
+    #expect(first?.bytes == [0])
+    let duplicate = try receiver.receive(into: &buffer)
+    #expect(duplicate == nil)
+    #expect(commands.drain().count == 2)
+    commands.stop()
+    let shutdown = try receiver.receive(into: &buffer)
+    #expect(shutdown?.bytes == [0])
 }

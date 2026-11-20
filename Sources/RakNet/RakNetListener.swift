@@ -172,6 +172,10 @@ struct TransportDriver {
     static func launch(
         socket: UDPSocket, role: Role, accepted: TransportInbox<RakNetConnection>, commands: TransportCommands
     ) {
+        if let wake = try? UDPSocket(clientFor: socket.localAddress) {
+            let destination = socket.localAddress.forLocalWake
+            commands.installWake { try? wake.send([0], to: destination) }
+        }
         DispatchQueue(label: "raknet.udp").async { // socket owner
             var driver = TransportDriver(socket: socket, role: role, accepted: accepted, commands: commands)
             driver.run()
@@ -249,7 +253,8 @@ struct TransportDriver {
                     maintain(at: now)
                     nextMaintenance = now + 20
                 }
-                if let datagram = try socket.receive(into: &buffer), commands.isOpen {
+                if let datagram = try socket.receive(into: &buffer), commands.isOpen,
+                   datagram.bytes != [0] { // command wakeup
                     try receive(datagram.bytes, from: datagram.sender, at: transportTime())
                 }
                 if role.isClient, dial == nil, peers.isEmpty { break }

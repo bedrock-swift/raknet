@@ -239,19 +239,27 @@ final class TransportCommands: @unchecked Sendable {
     private let lock = NSLock()
     private var open = true
     private var pending: [Command] = []
+    private var wake: (@Sendable () -> Void)?
+
+    func installWake(_ wake: @escaping @Sendable () -> Void) {
+        lock.withLock { if open { self.wake = wake } }
+    }
 
     func submit(_ command: Command) {
-        lock.withLock {
+        let wake = lock.withLock { () -> (@Sendable () -> Void)? in
             guard open else {
                 command.stop()
-                return
+                return nil
             }
             guard pending.count < 256 else {
                 command.fail(RakNetTransportError.sendQueueFull)
-                return
+                return nil
             }
+            let notify = pending.isEmpty
             pending.append(command)
+            return notify ? self.wake : nil
         }
+        wake?()
     }
 
     var isOpen: Bool {
@@ -268,12 +276,15 @@ final class TransportCommands: @unchecked Sendable {
     }
 
     func stop() {
-        let pending = lock.withLock {
+        let (pending, wake) = lock.withLock {
             open = false
             let commands = pending
+            let notify = wake
             pending = []
-            return commands
+            wake = nil
+            return (commands, notify)
         }
+        wake?()
         for command in pending {
             command.stop()
         }
