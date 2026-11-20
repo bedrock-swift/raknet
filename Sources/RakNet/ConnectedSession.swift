@@ -124,6 +124,23 @@ public struct ConnectedSession: Sendable {
         retransmissionTimer.smoothed.map { .milliseconds(Int64($0)) }
     }
 
+    public func maximumMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
+        Self.maximumMessageLength(datagramLimit: datagramLimit, reliability: reliability)
+    }
+
+    static func maximumMessageLength(datagramLimit: Int, reliability: RakNetReliability) -> Int {
+        let frameLimit = payloadLimit(datagramLimit: datagramLimit, reliability: reliability)
+        return reliability.hasMessageIndex ? Self.fragmentLimit * (frameLimit - 10) : frameLimit
+    }
+
+    private static func payloadLimit(datagramLimit: Int, reliability: RakNetReliability) -> Int {
+        var size = datagramLimit - SessionDatagram.frameHeaderSize - 3 // frame header
+        if reliability.hasMessageIndex { size -= 3 }
+        if reliability.hasSequenceIndex { size -= 3 }
+        if reliability.hasOrder { size -= 4 }
+        return size
+    }
+
     mutating func observeRoundTripTime(_ milliseconds: UInt64) {
         retransmissionTimer.observe(milliseconds)
     }
@@ -144,16 +161,13 @@ public struct ConnectedSession: Sendable {
         priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
         guard channel < 32, reliability.hasOrder || channel == 0 else { throw SessionError.invalidOrderingChannel }
-        var frameLimit = datagramLimit - SessionDatagram.frameHeaderSize - 3 // frame header
-        if reliability.hasMessageIndex { frameLimit -= 3 }
-        if reliability.hasSequenceIndex { frameLimit -= 3 }
-        if reliability.hasOrder { frameLimit -= 4 }
+        let frameLimit = Self.payloadLimit(datagramLimit: datagramLimit, reliability: reliability)
+        let limit = maximumMessageLength(for: reliability)
 
         let enqueue = priority != .immediate || (congestion != nil && reliability.hasMessageIndex)
         var frameCount = 0
         let chunkSizes = try payloads.map { payload in
             let chunkSize = payload.count > frameLimit ? frameLimit - 10 : frameLimit // split header
-            let limit = reliability.hasMessageIndex ? Self.fragmentLimit * chunkSize : frameLimit
             guard !payload.isEmpty, payload.count <= limit else { throw SessionError.invalidPayloadSize }
             if reliability.hasMessageIndex || enqueue {
                 frameCount += (payload.count + chunkSize - 1) / chunkSize

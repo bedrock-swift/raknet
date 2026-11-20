@@ -81,6 +81,10 @@ public struct OnlineConnection: Sendable {
     public var isClosed: Bool { state == .closed }
     public var roundTripTime: Duration? { session.roundTripTime }
 
+    public func maximumMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
+        session.maximumMessageLength(for: reliability)
+    }
+
     public mutating func start(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard case let .idle(guid) = state else { throw ConnectionError.invalidState }
         let request = [0x09] + bigEndianBytes(guid) + bigEndianBytes(milliseconds) + [0]

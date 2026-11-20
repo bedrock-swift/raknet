@@ -39,6 +39,10 @@ public final class RakNetConnection: Sendable {
 
     public var roundTripTime: Duration? { metrics.roundTripTime }
 
+    public func maximumMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
+        ConnectedSession.maximumMessageLength(datagramLimit: Int(mtu) - remoteAddress.udpOverhead, reliability: reliability)
+    }
+
     public func send(_ payload: [UInt8]) async throws {
         try await send(payload, reliability: .reliableOrdered)
     }

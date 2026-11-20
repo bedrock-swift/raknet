@@ -181,3 +181,17 @@ import Testing
     #expect(try receiver.receive(scheduled[0], at: 2).payloads.isEmpty)
     #expect(try receiver.receive(scheduled[1], at: 3).payloads == [[0xfe, 1], [0xfe, 2]])
 }
+
+@Test func negotiatedMessageLimitsMatchTheWireBudget() throws {
+    var sender = try ConnectedSession(mtu: 400)
+    let maximum = sender.maximumMessageLength()
+    #expect(maximum == 128 * 348)
+    #expect(try sender.send([UInt8](repeating: 0xfe, count: maximum), at: 0).count == 128)
+    #expect(throws: ConnectedSession.SessionError.invalidPayloadSize) {
+        try sender.send([UInt8](repeating: 0xfe, count: maximum + 1), at: 0)
+    }
+    let unsequenced = sender.maximumMessageLength(for: .unreliable)
+    #expect(unsequenced == 365)
+    let packet = try sender.send([UInt8](repeating: 0xfe, count: unsequenced), reliability: .unreliable, at: 0)
+    #expect(packet.first?.count == 372)
+}
