@@ -192,8 +192,9 @@ import Testing
     #expect(throws: ConnectedSession.SessionError.invalidPayloadSize) {
         try sender.send([UInt8](repeating: 0xfe, count: maximum + 1), at: 0)
     }
-    let unsequenced = sender.maximumMessageLength(for: .unreliable)
+    let unsequenced = sender.maximumUnfragmentedMessageLength(for: .unreliable)
     #expect(unsequenced == 365)
+    #expect(sender.maximumMessageLength(for: .unreliable) == 128 * 352)
     let packet = try sender.send([UInt8](repeating: 0xfe, count: unsequenced), reliability: .unreliable, at: 0)
     #expect(packet.first?.count == 372)
 }

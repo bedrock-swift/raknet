@@ -8,6 +8,15 @@ public enum RakNetReliability: UInt8, Sendable, Codable {
     case reliableWithAckReceipt = 6
     case reliableOrderedWithAckReceipt = 7
 
+    var fragmentedMode: RakNetReliability {
+        switch self {
+        case .unreliable: .reliable
+        case .unreliableSequenced: .reliableSequenced
+        case .unreliableWithAckReceipt: .reliableWithAckReceipt
+        default: self
+        }
+    }
+
     var hasMessageIndex: Bool {
         self == .reliable || self == .reliableSequenced || self == .reliableWithAckReceipt || isOrdered
     }

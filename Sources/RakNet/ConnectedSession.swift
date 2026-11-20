@@ -22,6 +22,12 @@ public struct ConnectedSession: Sendable {
         public fileprivate(set) var payloads: [[UInt8]] = []
     }
 
+    private struct SendPlan {
+        let payload: [UInt8]
+        let reliability: RakNetReliability
+        let chunkSize: Int
+    }
+
     private struct Outbound: Sendable, Codable {
         let frames: [Frame]
         let size: Int
@@ -141,12 +147,16 @@ public struct ConnectedSession: Sendable {
         Self.maximumMessageLength(datagramLimit: datagramLimit, reliability: reliability)
     }
 
-    static func maximumMessageLength(datagramLimit: Int, reliability: RakNetReliability) -> Int {
-        let frameLimit = payloadLimit(datagramLimit: datagramLimit, reliability: reliability)
-        return reliability.hasMessageIndex ? Self.fragmentLimit * (frameLimit - 10) : frameLimit
+    public func maximumUnfragmentedMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
+        Self.payloadLimit(datagramLimit: datagramLimit, reliability: reliability)
     }
 
-    private static func payloadLimit(datagramLimit: Int, reliability: RakNetReliability) -> Int {
+    static func maximumMessageLength(datagramLimit: Int, reliability: RakNetReliability) -> Int {
+        let frameLimit = payloadLimit(datagramLimit: datagramLimit, reliability: reliability.fragmentedMode)
+        return Self.fragmentLimit * (frameLimit - 10)
+    }
+
+    static func payloadLimit(datagramLimit: Int, reliability: RakNetReliability) -> Int {
         var size = datagramLimit - SessionDatagram.frameHeaderSize - 3 // frame header
         if reliability.hasMessageIndex { size -= 3 }
         if reliability.hasSequenceIndex { size -= 3 }
@@ -174,30 +184,36 @@ public struct ConnectedSession: Sendable {
         priority: RakNetPriority = .immediate, at milliseconds: UInt64
     ) throws -> [[UInt8]] {
         guard channel < 32, reliability.hasOrder || channel == 0 else { throw SessionError.invalidOrderingChannel }
-        let frameLimit = Self.payloadLimit(datagramLimit: datagramLimit, reliability: reliability)
-        let limit = maximumMessageLength(for: reliability)
-
-        let enqueue = priority != .immediate || (congestion != nil && reliability.hasMessageIndex)
+        let unfragmentedLimit = maximumUnfragmentedMessageLength(for: reliability)
+        let maxLength = maximumMessageLength(for: reliability)
+        var reliableFrames = 0
         var frameCount = 0
-        let chunkSizes = try payloads.map { payload in
-            let chunkSize = payload.count > frameLimit ? frameLimit - 10 : frameLimit // split header
-            guard !payload.isEmpty, payload.count <= limit else { throw SessionError.invalidPayloadSize }
-            if reliability.hasMessageIndex || enqueue {
-                frameCount += (payload.count + chunkSize - 1) / chunkSize
-                guard frameCount <= Self.windowSize else { throw SessionError.sendWindowFull }
+        let plans = try payloads.map { payload in
+            guard !payload.isEmpty, payload.count <= maxLength else { throw SessionError.invalidPayloadSize }
+            let fragmented = payload.count > unfragmentedLimit
+            let mode = fragmented ? reliability.fragmentedMode : reliability
+            let chunkSize = fragmented
+                ? Self.payloadLimit(datagramLimit: datagramLimit, reliability: mode) - 10
+                : unfragmentedLimit
+            let count = (payload.count + chunkSize - 1) / chunkSize
+            if mode.hasMessageIndex {
+                reliableFrames += count
+                guard reliableFrames <= Self.windowSize else { throw SessionError.sendWindowFull }
             }
-            return chunkSize
+            frameCount += count
+            return SendPlan(payload: payload, reliability: mode, chunkSize: chunkSize)
         }
+        let enqueue = priority != .immediate || (congestion != nil && reliableFrames > 0)
         if enqueue, queuedFrames + frameCount > Self.windowSize { throw SessionError.sendWindowFull }
-        if reliability.hasMessageIndex, frameCount > 0, !canSend(frameCount) { throw SessionError.sendWindowFull }
+        if reliableFrames > 0, !canSend(reliableFrames) { throw SessionError.sendWindowFull }
 
         var prepared: [Outbound] = []
         var frames: [Frame] = []
         var size = SessionDatagram.frameHeaderSize
-        for (payload, chunkSize) in zip(payloads, chunkSizes) {
-            for frame in makeFrames(for: payload, reliability: reliability, channel: channel, chunkSize: chunkSize) {
+        for plan in plans {
+            for frame in makeFrames(for: plan.payload, reliability: plan.reliability, channel: channel, chunkSize: plan.chunkSize) {
                 let frameSize = frame.encodedSize
-                if size + frameSize > datagramLimit {
+                if size + frameSize > datagramLimit || frames.first.map({ $0.reliability != frame.reliability }) == true {
                     prepared.append(Outbound(frames: frames, size: size))
                     frames.removeAll(keepingCapacity: true)
                     size = SessionDatagram.frameHeaderSize

@@ -112,6 +112,10 @@ public struct OnlineConnection: Sendable {
         session.maximumMessageLength(for: reliability)
     }
 
+    public func maximumUnfragmentedMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
+        session.maximumUnfragmentedMessageLength(for: reliability)
+    }
+
     public mutating func start(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard case let .idle(guid) = state else { throw ConnectionError.invalidState }
         let time = sessionTime(milliseconds)

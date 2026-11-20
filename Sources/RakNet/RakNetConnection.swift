@@ -127,6 +127,10 @@ public final class RakNetConnection: Sendable {
         ConnectedSession.maximumMessageLength(datagramLimit: Int(mtu) - remoteAddress.udpOverhead, reliability: reliability)
     }
 
+    public func maximumUnfragmentedMessageLength(for reliability: RakNetReliability = .reliableOrdered) -> Int {
+        ConnectedSession.payloadLimit(datagramLimit: Int(mtu) - remoteAddress.udpOverhead, reliability: reliability)
+    }
+
     public func send(_ payload: [UInt8]) async throws {
         try await send(payload, reliability: .reliableOrdered)
     }

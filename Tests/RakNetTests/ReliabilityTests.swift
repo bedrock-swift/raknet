@@ -10,9 +10,6 @@ import Testing
     #expect(try receiver.receive(first, at: 1).payloads == [[0xfe, 1]])
     #expect(try sender.retransmit(at: 1000).isEmpty)
 
-    #expect(throws: ConnectedSession.SessionError.invalidPayloadSize) {
-        try sender.send([UInt8](repeating: 0xfe, count: 366), reliability: .unreliable, at: 0)
-    }
     #expect(throws: ConnectedSession.SessionError.invalidOrderingChannel) {
         try sender.send([0xfe], reliability: .unreliable, channel: 1, at: 0)
     }
@@ -75,4 +72,24 @@ func receiptModesDeliverAndAcknowledgePayload(_ reliability: RakNetReliability) 
     let second = try #require(sender.send([0xfe, 2], reliability: .reliableOrdered, channel: 3, at: 0).first)
     #expect(try receiver.receive(second, at: 1).payloads.isEmpty)
     #expect(try receiver.receive(first, at: 2).payloads == [[0xfe, 1], [0xfe, 2]])
+}
+
+@Test(arguments: [RakNetReliability.unreliable, .unreliableSequenced, .unreliableWithAckReceipt])
+func oversizedUnreliablePayloadsUpgradeOnlyTheirFragments(_ reliability: RakNetReliability) throws {
+    var sender = try ConnectedSession(mtu: 400)
+    var receiver = try ConnectedSession(mtu: 400)
+    let payloads = [[0xfe, 1], [UInt8](repeating: 0xfd, count: 400), [0xfe, 2]]
+    let packets = try sender.sendBatch(payloads, reliability: reliability, at: 0)
+    try #require(packets.count == 4)
+    #expect(packets[0][4] == reliability.rawValue << 5)
+    #expect(packets[3][4] == packets[0][4])
+    #expect(packets[1][4] & 0x10 != 0)
+    #expect(packets[2][4] == packets[1][4])
+    #expect(packets[1][4] >> 5 != reliability.rawValue)
+    var received: [[UInt8]] = []
+    for packet in packets { received += try receiver.receive(packet, at: 1).payloads }
+    #expect(received == payloads)
+    let retry = try sender.retransmit(at: 300)
+    #expect(retry.count == 2)
+    #expect(retry.allSatisfy { $0[4] == packets[1][4] })
 }
