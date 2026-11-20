@@ -1,4 +1,4 @@
-struct CongestionWindow: Sendable {
+struct CongestionWindow: Sendable, Codable {
     private let datagramSize: Int
     private let maximum: Int
     private var slowStartThreshold: Int
@@ -11,6 +11,12 @@ struct CongestionWindow: Sendable {
         maximum = 256 * datagramSize
         slowStartThreshold = maximum
         bytes = datagramSize
+    }
+
+    func isValid(for limit: Int) -> Bool {
+        datagramSize == limit && maximum == 256 * limit
+            && (limit...maximum).contains(slowStartThreshold) && (limit...maximum).contains(bytes)
+            && (recoverySequence.map { $0 <= 0x00ff_ffff } ?? true)
     }
 
     mutating func acknowledge(sequence: UInt32, bytes acknowledged: Int) {

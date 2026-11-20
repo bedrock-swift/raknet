@@ -14,6 +14,25 @@ public enum RakNetTransportError: Error, Equatable {
 }
 
 public struct RakNetSessionSnapshot: Sendable {
+    public enum ArchiveError: Error, Equatable {
+        case invalidState
+        case unsupportedVersion(UInt8)
+        case sizeLimit
+    }
+
+    private struct Archive: Codable {
+        let version: UInt8
+        let localAddress: RakNetEndpoint
+        let remoteAddress: RakNetEndpoint
+        let mtu: UInt16
+        let capturedAt: UInt64
+        let bufferedPayloads: [[UInt8]]
+        let connection: OnlineConnection.Archive
+    }
+
+    private static let archiveVersion: UInt8 = 1
+    private static let archiveSizeLimit = 32 * 1024 * 1024
+
     public let localAddress: RakNetEndpoint
     public let mtu: UInt16
     public let bufferedPayloads: [[UInt8]]
@@ -31,6 +50,36 @@ public struct RakNetSessionSnapshot: Sendable {
         self.state = state
         self.bufferedPayloads = bufferedPayloads
         self.capturedAt = capturedAt
+    }
+
+    public init(data: Data) throws {
+        guard data.count <= Self.archiveSizeLimit else { throw ArchiveError.sizeLimit }
+        let archive = try PropertyListDecoder().decode(Archive.self, from: data)
+        guard archive.version == Self.archiveVersion else { throw ArchiveError.unsupportedVersion(archive.version) }
+        guard archive.localAddress.port != 0, archive.remoteAddress.port != 0, !archive.remoteAddress.isUnspecified,
+              archive.localAddress.udpOverhead == archive.remoteAddress.udpOverhead,
+              archive.bufferedPayloads.count <= 64,
+              archive.bufferedPayloads.allSatisfy({ !$0.isEmpty && $0.count <= 512 * 1024 }),
+              archive.bufferedPayloads.reduce(0, { $0 + $1.count }) <= 512 * 1024 else {
+            throw ArchiveError.invalidState
+        }
+        let connection = try OnlineConnection(
+            restoring: archive.remoteAddress, mtu: archive.mtu, at: archive.capturedAt, archive: archive.connection
+        )
+        self.init(
+            localAddress: archive.localAddress, mtu: archive.mtu, state: connection,
+            bufferedPayloads: archive.bufferedPayloads, capturedAt: archive.capturedAt
+        )
+    }
+
+    public func encoded() throws -> Data {
+        let archive = Archive(
+            version: Self.archiveVersion, localAddress: localAddress, remoteAddress: remoteAddress, mtu: mtu,
+            capturedAt: capturedAt, bufferedPayloads: bufferedPayloads, connection: try state.archive(at: capturedAt)
+        )
+        let data = try PropertyListEncoder().encode(archive)
+        guard data.count <= Self.archiveSizeLimit else { throw ArchiveError.sizeLimit }
+        return data
     }
 
     public func restore() -> OnlineConnection {

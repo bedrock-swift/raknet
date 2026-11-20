@@ -104,7 +104,8 @@ private func expectWithin<T: Sendable>(
     let first = try await expectWithin("first batch packet") { try await server.receive() }
     #expect(first == [0xfe, 1])
 
-    let snapshot = try await server.detach()
+    let detached = try await server.detach()
+    let snapshot = try RakNetSessionSnapshot(data: detached.encoded())
     let ended = try await server.receive()
     #expect(ended == nil)
     let resumed = try await listener.adopt(snapshot)

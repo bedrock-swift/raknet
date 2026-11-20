@@ -1,6 +1,6 @@
 import Dispatch
 
-public struct IPv4Endpoint: Hashable, Sendable {
+public struct IPv4Endpoint: Hashable, Sendable, Codable {
     public let address: UInt32
     public let port: UInt16
 
@@ -14,7 +14,7 @@ public struct IPv4Endpoint: Hashable, Sendable {
     }
 }
 
-public struct IPv6Endpoint: Hashable, Sendable {
+public struct IPv6Endpoint: Hashable, Sendable, Codable {
     public let addressHigh: UInt64
     public let addressLow: UInt64
     public let port: UInt16
@@ -36,7 +36,7 @@ public struct IPv6Endpoint: Hashable, Sendable {
     }
 }
 
-public enum RakNetEndpoint: Hashable, Sendable {
+public enum RakNetEndpoint: Hashable, Sendable, Codable {
     case ipv4(IPv4Endpoint)
     case ipv6(IPv6Endpoint)
 

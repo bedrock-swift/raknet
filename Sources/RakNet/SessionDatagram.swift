@@ -1,4 +1,4 @@
-public enum RakNetReliability: UInt8, Sendable {
+public enum RakNetReliability: UInt8, Sendable, Codable {
     case unreliable = 0
     case unreliableSequenced = 1
     case reliable = 2
@@ -25,13 +25,13 @@ public enum RakNetReliability: UInt8, Sendable {
     }
 }
 
-struct Frame: Equatable, Sendable {
-    struct Order: Equatable, Hashable, Sendable {
+struct Frame: Equatable, Sendable, Codable {
+    struct Order: Equatable, Hashable, Sendable, Codable {
         let index: UInt32
         let channel: UInt8
     }
 
-    struct Fragment: Equatable, Sendable {
+    struct Fragment: Equatable, Sendable, Codable {
         let count: UInt32
         let id: UInt16
         let index: UInt32

@@ -1,3 +1,5 @@
+import Foundation
+
 public struct OnlineConnection: Sendable {
     public enum ConnectionError: Error, Equatable {
         case invalidState
@@ -8,6 +10,12 @@ public struct OnlineConnection: Sendable {
         public fileprivate(set) var payloads: [[UInt8]] = []
         public fileprivate(set) var opened = false
         public fileprivate(set) var closed = false
+    }
+
+    struct Archive: Codable {
+        let sessionTime: UInt64
+        let pendingPing: UInt64?
+        let session: Data
     }
 
     private enum State: Equatable, Sendable {
@@ -76,6 +84,23 @@ public struct OnlineConnection: Sendable {
             mtu: mtu, udpOverhead: server.udpOverhead,
             batchAcknowledgements: batchAcknowledgements, congestionControl: congestionControl
         )
+    }
+
+    init(restoring peer: RakNetEndpoint, mtu: UInt16, at capturedAt: UInt64, archive: Archive) throws {
+        if let pendingPing = archive.pendingPing, pendingPing > archive.sessionTime {
+            throw RakNetSessionSnapshot.ArchiveError.invalidState
+        }
+        self.peer = peer
+        state = .open
+        pendingPing = archive.pendingPing
+        clockAnchor = capturedAt == archive.sessionTime ? nil : (capturedAt, archive.sessionTime)
+        session = try ConnectedSession(
+            archive: archive.session, mtu: mtu, udpOverhead: peer.udpOverhead, at: archive.sessionTime
+        )
+    }
+
+    func archive(at capturedAt: UInt64) throws -> Archive {
+        Archive(sessionTime: sessionTime(capturedAt), pendingPing: pendingPing, session: try session.archive())
     }
 
     public var isOpen: Bool { state == .open }

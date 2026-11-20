@@ -1,3 +1,4 @@
+import Foundation
 @testable import RakNet
 import Testing
 
@@ -70,7 +71,10 @@ import Testing
     let snapshot = RakNetSessionSnapshot(
         localAddress: clientAddress, mtu: mtu, state: source, bufferedPayloads: [], capturedAt: 96
     )
-    var resumed = snapshot.restore(at: 0)
+    let encoded = try snapshot.encoded()
+    try rejectInvalidSnapshotArchives(encoded)
+    let decoded = try RakNetSessionSnapshot(data: encoded)
+    var resumed = decoded.restore(at: 0)
     #expect(try resumed.retransmit(at: 0).isEmpty)
     let retry = try resumed.retransmit(at: 3_000)
     try #require(retry.count == 1)
@@ -85,4 +89,28 @@ import Testing
     }
     #expect(client.isClosed)
     #expect(server.isClosed)
+}
+
+private func rejectInvalidSnapshotArchives(_ encoded: Data) throws {
+    let outer = try PropertyListSerialization.propertyList(from: encoded, format: nil)
+    var archive = try #require(outer as? [String: Any])
+    archive["version"] = 42
+    let future = try PropertyListSerialization.data(fromPropertyList: archive, format: .binary, options: 0)
+    #expect(throws: RakNetSessionSnapshot.ArchiveError.unsupportedVersion(42)) {
+        try RakNetSessionSnapshot(data: future)
+    }
+
+    archive["version"] = 1
+    let connectionRecord = archive["connection"]
+    var connection = try #require(connectionRecord as? [String: Any])
+    let sessionData = try #require(connection["session"] as? Data)
+    let inner = try PropertyListSerialization.propertyList(from: sessionData, format: nil)
+    var session = try #require(inner as? [String: Any])
+    session["nextDatagram"] = 1 << 24
+    connection["session"] = try PropertyListSerialization.data(fromPropertyList: session, format: .binary, options: 0)
+    archive["connection"] = connection
+    let corrupted = try PropertyListSerialization.data(fromPropertyList: archive, format: .binary, options: 0)
+    #expect(throws: RakNetSessionSnapshot.ArchiveError.invalidState) {
+        try RakNetSessionSnapshot(data: corrupted)
+    }
 }

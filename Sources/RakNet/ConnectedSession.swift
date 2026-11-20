@@ -1,3 +1,5 @@
+import Foundation
+
 public enum RakNetPriority: Int, CaseIterable, Sendable {
     case immediate
     case high
@@ -20,12 +22,12 @@ public struct ConnectedSession: Sendable {
         public fileprivate(set) var payloads: [[UInt8]] = []
     }
 
-    private struct Outbound: Sendable {
+    private struct Outbound: Sendable, Codable {
         let frames: [Frame]
         let size: Int
     }
 
-    private struct OutboundQueue: Sendable {
+    private struct OutboundQueue: Sendable, Codable {
         private var datagrams: [Outbound] = []
         private var offset = 0
 
@@ -35,6 +37,12 @@ public struct ConnectedSession: Sendable {
 
         var firstReliable: Outbound? {
             datagrams[offset...].first { $0.frames.first?.messageIndex != nil }
+        }
+
+        var activeDatagrams: ArraySlice<Outbound>? {
+            guard datagrams.count <= 2 * ConnectedSession.windowSize,
+                  (0...datagrams.count).contains(offset) else { return nil }
+            return datagrams[offset...]
         }
 
         mutating func append(_ new: [Outbound]) {
@@ -53,24 +61,24 @@ public struct ConnectedSession: Sendable {
         }
     }
 
-    private struct Pending: Sendable {
+    private struct Pending: Sendable, Codable {
         let datagram: Outbound
         let sentAt: UInt64
         let retries: Int
     }
 
-    private struct FragmentKey: Hashable, Sendable {
+    private struct FragmentKey: Hashable, Sendable, Codable {
         let id: UInt16
         let order: Frame.Order?
         let sequence: UInt32?
     }
 
-    private struct SequencedPayload: Sendable {
+    private struct SequencedPayload: Sendable, Codable {
         let sequence: UInt32
         let payload: [UInt8]
     }
 
-    private struct Assembly: Sendable {
+    private struct Assembly: Sendable, Codable {
         let count: UInt32
         var parts: [UInt32: [UInt8]] = [:]
         var bytes = 0
@@ -508,7 +516,7 @@ public struct ConnectedSession: Sendable {
     }
 }
 
-private struct SequenceWindow: Sendable {
+private struct SequenceWindow: Sendable, Codable {
     enum Arrival: Equatable {
         case tooOld
         case tooFar
@@ -521,6 +529,13 @@ private struct SequenceWindow: Sendable {
 
     init(size: Int) {
         seen = [Int64](repeating: -1, count: size)
+    }
+
+    func isValid(size: Int) -> Bool {
+        guard seen.count == size, (-1...Int64.max - Int64(size)).contains(newest) else { return false }
+        return seen.enumerated().allSatisfy { slot, value in
+            value == -1 || (value >= 0 && value <= newest && Int(value % Int64(size)) == slot)
+        }
     }
 
     mutating func insert(_ sequence: UInt32) -> Arrival {
@@ -536,5 +551,157 @@ private struct SequenceWindow: Sendable {
         seen[slot] = index
         newest = max(newest, index)
         return .accepted(gap: max(0, Int(delta) - 1))
+    }
+}
+
+extension ConnectedSession {
+    private struct Archive: Codable {
+        let batchAcknowledgements: Bool
+        let pendingAcknowledgements: Set<UInt32>
+        let nextDatagram: UInt32
+        let nextMessage: UInt32
+        let nextOrder: [UInt32]
+        let nextSequence: [UInt32]
+        let nextFragment: UInt16
+        let sent: [UInt32: Pending]
+        let congestion: CongestionWindow?
+        let outbound: [OutboundQueue]
+        let retransmissionTimer: RetransmissionTimer
+        let incoming: SequenceWindow
+        let reliable: SequenceWindow
+        let expectedOrder: [UInt32]
+        let ordered: [Frame.Order: [UInt8]]
+        let expectedSequence: [UInt32]
+        let futureSequences: [Frame.Order: SequencedPayload]
+        let fragments: [FragmentKey: Assembly]
+    }
+
+    func archive() throws -> Data {
+        try PropertyListEncoder().encode(Archive(
+            batchAcknowledgements: batchAcknowledgements,
+            pendingAcknowledgements: pendingAcknowledgements,
+            nextDatagram: nextDatagram,
+            nextMessage: nextMessage,
+            nextOrder: nextOrder,
+            nextSequence: nextSequence,
+            nextFragment: nextFragment,
+            sent: sent,
+            congestion: congestion,
+            outbound: outbound,
+            retransmissionTimer: retransmissionTimer,
+            incoming: incoming,
+            reliable: reliable,
+            expectedOrder: expectedOrder,
+            ordered: ordered,
+            expectedSequence: expectedSequence,
+            futureSequences: futureSequences,
+            fragments: fragments
+        ))
+    }
+
+    init(archive data: Data, mtu: UInt16, udpOverhead: Int, at capturedAt: UInt64) throws {
+        let record = try PropertyListDecoder().decode(Archive.self, from: data)
+        try self.init(
+            mtu: mtu, udpOverhead: udpOverhead, batchAcknowledgements: record.batchAcknowledgements,
+            congestionControl: record.congestion != nil
+        )
+        guard record.nextDatagram <= Self.sequenceMask, record.nextMessage <= Self.sequenceMask,
+              [record.nextOrder, record.nextSequence, record.expectedOrder, record.expectedSequence]
+                .allSatisfy({ $0.count == 32 && $0.allSatisfy { $0 <= Self.sequenceMask } }),
+              record.incoming.isValid(size: Self.windowSize), record.reliable.isValid(size: Self.windowSize),
+              record.retransmissionTimer.isValid,
+              record.congestion?.isValid(for: datagramLimit) ?? true,
+              record.pendingAcknowledgements.count < (datagramLimit - 3) / 4,
+              record.pendingAcknowledgements.allSatisfy({ $0 <= Self.sequenceMask }),
+              record.sent.count <= Self.windowSize,
+              record.outbound.count == RakNetPriority.allCases.count else {
+            throw RakNetSessionSnapshot.ArchiveError.invalidState
+        }
+
+        let queues = record.outbound.compactMap(\.activeDatagrams)
+        let queued = queues.flatMap { $0 }
+        guard queues.count == record.outbound.count, queued.count <= Self.windowSize,
+              queued.allSatisfy(validArchivedDatagram),
+              record.sent.allSatisfy({ sequence, packet in
+                  sequence <= Self.sequenceMask && (0...8).contains(packet.retries)
+                      && packet.sentAt <= capturedAt && validArchivedDatagram(packet.datagram)
+                      && packet.datagram.frames.first?.messageIndex != nil
+              }) else {
+            throw RakNetSessionSnapshot.ArchiveError.invalidState
+        }
+        let queuedFrames = queued.reduce(0) { $0 + $1.frames.count }
+        let sentFrames = record.sent.values.reduce(0) { $0 + $1.datagram.frames.count }
+        guard queuedFrames <= Self.windowSize, sentFrames <= Self.windowSize,
+              let bufferedBytes = Self.archivedReceiveSize(record, datagramLimit: peerDatagramLimit) else {
+            throw RakNetSessionSnapshot.ArchiveError.invalidState
+        }
+
+        pendingAcknowledgements = record.pendingAcknowledgements
+        nextDatagram = record.nextDatagram
+        nextMessage = record.nextMessage
+        nextOrder = record.nextOrder
+        nextSequence = record.nextSequence
+        nextFragment = record.nextFragment
+        sent = record.sent
+        congestion = record.congestion
+        outbound = record.outbound
+        retransmissionTimer = record.retransmissionTimer
+        incoming = record.incoming
+        reliable = record.reliable
+        expectedOrder = record.expectedOrder
+        ordered = record.ordered
+        expectedSequence = record.expectedSequence
+        futureSequences = record.futureSequences
+        fragments = record.fragments
+        self.queuedFrames = queuedFrames
+        queuedBytes = queued.reduce(0) { $0 + $1.size }
+        bytesInFlight = record.sent.values.reduce(0) { $0 + $1.datagram.size }
+        self.bufferedBytes = bufferedBytes
+    }
+
+    private func validArchivedDatagram(_ datagram: Outbound) -> Bool {
+        guard (SessionDatagram.frameHeaderSize...datagramLimit).contains(datagram.size),
+              let first = datagram.frames.first, datagram.frames.count <= Self.windowSize else { return false }
+        for frame in datagram.frames {
+            guard frame.reliability == first.reliability, !frame.payload.isEmpty, frame.payload.count <= datagramLimit,
+                  (frame.messageIndex != nil) == frame.reliability.hasMessageIndex,
+                  (frame.sequenceIndex != nil) == frame.reliability.hasSequenceIndex,
+                  (frame.order != nil) == frame.reliability.hasOrder,
+                  frame.messageIndex.map({ $0 <= Self.sequenceMask }) ?? true,
+                  frame.sequenceIndex.map({ $0 <= Self.sequenceMask }) ?? true,
+                  frame.order.map(Self.validOrder) ?? true else { return false }
+            if let split = frame.fragment {
+                guard (2...UInt32(Self.fragmentLimit)).contains(split.count), split.index < split.count else {
+                    return false
+                }
+            }
+        }
+        return datagram.frames.reduce(SessionDatagram.frameHeaderSize) { $0 + $1.encodedSize } == datagram.size
+    }
+
+    private static func validOrder(_ order: Frame.Order) -> Bool {
+        order.channel < 32 && order.index <= sequenceMask
+    }
+
+    private static func archivedReceiveSize(_ record: Archive, datagramLimit: Int) -> Int? {
+        guard record.ordered.count <= windowSize * 32, record.futureSequences.count <= windowSize * 32,
+              record.fragments.count <= fragmentLimit,
+              record.ordered.allSatisfy({ validOrder($0.key) && !$0.value.isEmpty && $0.value.count <= receiveByteLimit }),
+              record.futureSequences.allSatisfy({
+                  validOrder($0.key) && $0.value.sequence <= sequenceMask
+                      && !$0.value.payload.isEmpty && $0.value.payload.count <= receiveByteLimit
+              }) else { return nil }
+        var bytes = record.ordered.values.reduce(0) { $0 + $1.count }
+        bytes += record.futureSequences.values.reduce(0) { $0 + $1.payload.count }
+        for (key, assembly) in record.fragments {
+            guard key.order.map(validOrder) ?? true,
+                  key.sequence.map({ $0 <= sequenceMask }) ?? true,
+                  (2...UInt32(fragmentLimit)).contains(assembly.count), !assembly.parts.isEmpty,
+                  assembly.parts.count < Int(assembly.count),
+                  assembly.parts.allSatisfy({ $0.key < assembly.count && !$0.value.isEmpty && $0.value.count <= datagramLimit }),
+                  assembly.bytes == assembly.parts.values.reduce(0, { $0 + $1.count }) else { return nil }
+            bytes += assembly.bytes
+        }
+        return bytes <= receiveByteLimit ? bytes : nil
     }
 }
