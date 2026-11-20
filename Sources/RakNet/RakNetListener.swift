@@ -109,6 +109,13 @@ public final class RakNetListener: Sendable {
         try await accepted.next()
     }
 
+    public func adopt(_ snapshot: RakNetSessionSnapshot) async throws -> RakNetConnection {
+        try Task.checkCancellation()
+        return try await withCheckedThrowingContinuation { continuation in
+            commands.submit(.adopt(snapshot, continuation))
+        }
+    }
+
     public func close() {
         commands.stop()
         accepted.finish(discardBuffered: true)
@@ -278,10 +285,7 @@ struct TransportDriver {
             peer.metrics.update(from: peer.connection)
             if input.opened {
                 dial = nil
-                let connection = RakNetConnection(
-                    localAddress: socket.localAddress, key: peer.key, mtu: peer.mtu,
-                    messages: peer.messages, commands: commands, metrics: peer.metrics
-                )
+                let connection = connectionHandle(for: peer)
                 guard accepted.offer(connection) else {
                     try send(try peer.connection.close(at: now), to: address)
                     remove(address)
@@ -357,24 +361,45 @@ struct TransportDriver {
     ) {
         do {
             if let negotiation = response.negotiation, peers[address] == nil {
-                guard peers.count < listener.maximumConnections else { return }
-                let host = ListenerHost(address)
-                if let limit = listener.maximumConnectionsPerIP, connectionsByHost[host, default: 0] >= limit { return }
-                let key = TransportPeerKey(address: address, generation: generation)
-                generation &+= 1 // reused udp endpoints
                 let connection = try OnlineConnection(
                     accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
                 )
-                peers[address] = Peer(
-                    key: key, mtu: negotiation.mtu, connection: connection, now: now,
-                    onlinePacketsPerSecond: listener.onlinePacketsPerSecond
-                )
-                if listener.maximumConnectionsPerIP != nil { connectionsByHost[host, default: 0] += 1 }
+                _ = try register(connection, mtu: negotiation.mtu, listener: listener, at: now)
             }
             try socket.send(response.datagram, to: address)
         } catch {
             remove(address, failure: error)
         }
+    }
+
+    private mutating func register(
+        _ connection: OnlineConnection, mtu: UInt16, listener: Listener, at now: UInt64
+    ) throws -> Peer {
+        let address = connection.peer
+        guard peers[address] == nil else { throw RakNetTransportError.connectionAlreadyExists }
+        let host = ListenerHost(address)
+        guard peers.count < listener.maximumConnections,
+              listener.maximumConnectionsPerIP.map({ connectionsByHost[host, default: 0] < $0 }) ?? true else {
+            throw RakNetTransportError.connectionLimitReached
+        }
+
+        let key = TransportPeerKey(address: address, generation: generation)
+        generation &+= 1 // reused udp endpoints
+        let peer = Peer(
+            key: key, mtu: mtu, connection: connection, now: now,
+            onlinePacketsPerSecond: listener.onlinePacketsPerSecond
+        )
+        peer.metrics.update(from: connection)
+        peers[address] = peer
+        if listener.maximumConnectionsPerIP != nil { connectionsByHost[host, default: 0] += 1 }
+        return peer
+    }
+
+    private func connectionHandle(for peer: Peer) -> RakNetConnection {
+        RakNetConnection(
+            localAddress: socket.localAddress, key: peer.key, mtu: peer.mtu,
+            messages: peer.messages, commands: commands, metrics: peer.metrics
+        )
     }
 
     private mutating func perform(_ command: TransportCommands.Command, at now: UInt64) {
@@ -395,14 +420,29 @@ struct TransportDriver {
                     try send(try peer.connection.close(at: now), to: key.address)
                 }
                 continuation?.resume()
-            case let .snapshot(key, continuation):
+            case let .snapshot(key, detach, continuation):
                 guard let peer = peers[key.address], peer.key == key, peer.connection.isOpen else {
                     throw RakNetTransportError.closed
                 }
-                continuation.resume(returning: RakNetSessionSnapshot(
+                let buffered = detach ? peer.messages.drainAndFinish() : peer.messages.bufferedValues()
+                let snapshot = RakNetSessionSnapshot(
                     localAddress: socket.localAddress, mtu: peer.mtu, state: peer.connection,
-                    bufferedPayloads: peer.messages.bufferedValues(), capturedAt: now
-                ))
+                    bufferedPayloads: buffered, capturedAt: now
+                )
+                if detach { remove(key.address) }
+                continuation.resume(returning: snapshot)
+            case let .adopt(snapshot, continuation):
+                guard case let .listen(listener) = role, snapshot.localAddress == socket.localAddress else {
+                    throw RakNetTransportError.snapshotAddressMismatch
+                }
+                let peer = try register(snapshot.restore(), mtu: snapshot.mtu, listener: listener, at: now)
+                for payload in snapshot.bufferedPayloads {
+                    guard peer.messages.offer(payload, size: payload.count) else {
+                        remove(peer.key.address)
+                        throw RakNetTransportError.receiveBufferFull
+                    }
+                }
+                continuation.resume(returning: connectionHandle(for: peer))
             }
         } catch {
             command.fail(error)

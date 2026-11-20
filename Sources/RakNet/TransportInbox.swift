@@ -70,22 +70,32 @@ final class TransportInbox<Element: Sendable>: @unchecked Sendable {
         lock.withLock { buffered.map(\.value) }
     }
 
-    func finish(_ error: (any Error)? = nil, discardBuffered: Bool = false) {
+    func drainAndFinish() -> [Element] {
         lock.withLock {
-            guard !finished else { return }
-            finished = true
-            failure = error
-            if discardBuffered {
-                buffered.removeAll()
-                bytes = 0
-            }
-            if let waiter {
-                self.waiter = nil
-                if let error {
-                    waiter.continuation.resume(throwing: error)
-                } else {
-                    waiter.continuation.resume(returning: nil)
-                }
+            let values = buffered.map(\.value)
+            finishLocked(nil, discardBuffered: true)
+            return values
+        }
+    }
+
+    func finish(_ error: (any Error)? = nil, discardBuffered: Bool = false) {
+        lock.withLock { finishLocked(error, discardBuffered: discardBuffered) }
+    }
+
+    private func finishLocked(_ error: (any Error)?, discardBuffered: Bool) {
+        guard !finished else { return }
+        finished = true
+        failure = error
+        if discardBuffered {
+            buffered.removeAll()
+            bytes = 0
+        }
+        if let waiter {
+            self.waiter = nil
+            if let error {
+                waiter.continuation.resume(throwing: error)
+            } else {
+                waiter.continuation.resume(returning: nil)
             }
         }
     }

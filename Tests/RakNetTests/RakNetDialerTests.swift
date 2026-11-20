@@ -88,3 +88,36 @@ private func expectWithin<T: Sendable>(
         return result
     }
 }
+
+@Test(.timeLimit(.minutes(1))) func listenerAdoptsDetachedSessionAndKeepsItsOrdering() async throws {
+    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let listener = try RakNetListener.listen(on: endpoint, maximumConnectionsPerIP: 1)
+    defer { listener.close() }
+    let client = try await RakNetConnection.dial(listener.localAddress)
+    let incoming = try await expectWithin("accept") { try await listener.accept() }
+    let server = try #require(incoming)
+
+    try await server.send([0xfe, 0])
+    let initial = try await expectWithin("reply before detach") { try await client.receive() }
+    #expect(initial == [0xfe, 0])
+    try await client.sendBatch([[0xfe, 1], [0xfe, 2]])
+    let first = try await expectWithin("first batch packet") { try await server.receive() }
+    #expect(first == [0xfe, 1])
+
+    let snapshot = try await server.detach()
+    let ended = try await server.receive()
+    #expect(ended == nil)
+    let resumed = try await listener.adopt(snapshot)
+    await #expect(throws: RakNetTransportError.connectionAlreadyExists) { try await listener.adopt(snapshot) }
+    let buffered = try await expectWithin("buffered packet") { try await resumed.receive() }
+    #expect(buffered == [0xfe, 2])
+
+    try await server.close()
+    try await client.send([0xfe, 3])
+    let next = try await expectWithin("continued packet") { try await resumed.receive() }
+    #expect(next == [0xfe, 3])
+    try await resumed.send([0xfe, 4])
+    let reply = try await expectWithin("reply after adopt") { try await client.receive() }
+    #expect(reply == [0xfe, 4])
+    try await client.close()
+}

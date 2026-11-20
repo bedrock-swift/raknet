@@ -8,6 +8,9 @@ public enum RakNetTransportError: Error, Equatable {
     case sendQueueFull
     case invalidConnectionLimit
     case invalidRemoteAddress
+    case snapshotAddressMismatch
+    case connectionAlreadyExists
+    case connectionLimitReached
 }
 
 public struct RakNetSessionSnapshot: Sendable {
@@ -103,10 +106,17 @@ public final class RakNetConnection: Sendable {
     public func snapshot() async throws -> RakNetSessionSnapshot {
         try Task.checkCancellation()
         let snapshot: RakNetSessionSnapshot = try await withCheckedThrowingContinuation { continuation in
-            commands.submit(.snapshot(key, continuation))
+            commands.submit(.snapshot(key, detach: false, continuation))
         }
         try Task.checkCancellation()
         return snapshot
+    }
+
+    public func detach() async throws -> RakNetSessionSnapshot {
+        try Task.checkCancellation()
+        return try await withCheckedThrowingContinuation { continuation in
+            commands.submit(.snapshot(key, detach: true, continuation))
+        }
     }
 
     public func close() async throws {
@@ -146,13 +156,15 @@ final class TransportCommands: @unchecked Sendable {
     enum Command: Sendable {
         case send(TransportPeerKey, [[UInt8]], RakNetReliability, UInt8, RakNetPriority, CheckedContinuation<Void, any Error>)
         case close(TransportPeerKey, CheckedContinuation<Void, any Error>?)
-        case snapshot(TransportPeerKey, CheckedContinuation<RakNetSessionSnapshot, any Error>)
+        case snapshot(TransportPeerKey, detach: Bool, CheckedContinuation<RakNetSessionSnapshot, any Error>)
+        case adopt(RakNetSessionSnapshot, CheckedContinuation<RakNetConnection, any Error>)
 
         func fail(_ error: any Error) {
             switch self {
             case let .send(_, _, _, _, _, continuation): continuation.resume(throwing: error)
             case let .close(_, continuation): continuation?.resume(throwing: error)
-            case let .snapshot(_, continuation): continuation.resume(throwing: error)
+            case let .snapshot(_, _, continuation): continuation.resume(throwing: error)
+            case let .adopt(_, continuation): continuation.resume(throwing: error)
             }
         }
 
