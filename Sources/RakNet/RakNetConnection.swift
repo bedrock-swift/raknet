@@ -206,7 +206,7 @@ final class TransportMetrics: @unchecked Sendable {
     }
 }
 
-struct TransportPeerKey: Equatable, Sendable {
+struct TransportPeerKey: Hashable, Sendable {
     let address: RakNetEndpoint
     let generation: UInt64
 }
@@ -240,6 +240,13 @@ final class TransportCommands: @unchecked Sendable {
     private var open = true
     private var pending: [Command] = []
     private var wake: (@Sendable () -> Void)?
+    private let capacity: Int
+    private var sendsByPeer: [TransportPeerKey: Int] = [:]
+    private var sendBytes = 0
+
+    init(peerLimit: Int = 1) {
+        capacity = max(256, min(peerLimit, 512) * 8)
+    }
 
     func installWake(_ wake: @escaping @Sendable () -> Void) {
         lock.withLock { if open { self.wake = wake } }
@@ -251,7 +258,7 @@ final class TransportCommands: @unchecked Sendable {
                 command.stop()
                 return nil
             }
-            guard pending.count < 256 else {
+            guard reserve(command) else {
                 command.fail(RakNetTransportError.sendQueueFull)
                 return nil
             }
@@ -260,6 +267,23 @@ final class TransportCommands: @unchecked Sendable {
             return notify ? self.wake : nil
         }
         wake?()
+    }
+
+    private func reserve(_ command: Command) -> Bool {
+        guard case let .send(key, payloads, _, _, _, _) = command else {
+            return pending.count < capacity + 64 // control command reserve
+        }
+        let bytes = payloads.reduce(0) { $0 + $1.count }
+        guard pending.count < capacity, sendsByPeer[key, default: 0] < 64,
+              bytes <= 48 * 1024 * 1024 - sendBytes else { return false }
+        sendsByPeer[key, default: 0] += 1
+        sendBytes += bytes
+        return true
+    }
+
+    private func resetSendBudget() {
+        sendsByPeer.removeAll(keepingCapacity: true)
+        sendBytes = 0
     }
 
     var isOpen: Bool {
@@ -271,6 +295,7 @@ final class TransportCommands: @unchecked Sendable {
             guard open else { return [] }
             let commands = pending
             pending = []
+            resetSendBudget()
             return commands
         }
     }
@@ -281,6 +306,7 @@ final class TransportCommands: @unchecked Sendable {
             let commands = pending
             let notify = wake
             pending = []
+            resetSendBudget()
             wake = nil
             return (commands, notify)
         }

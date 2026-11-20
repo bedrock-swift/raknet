@@ -38,3 +38,37 @@ import Testing
     let shutdown = try receiver.receive(into: &buffer)
     #expect(shutdown?.bytes == [0])
 }
+
+@Test func commandQueueAdmitsFanoutAndLimitsOnePeer() async {
+    let commands = TransportCommands(peerLimit: 128)
+    let submitted = AsyncStream<Void>.makeStream()
+    let total = 380
+    let pending = Task {
+        await withTaskGroup(of: Bool.self) { group in
+            for i in 0..<total {
+                let port = i < 300 ? UInt16(2_000 + i) : 3_000
+                let endpoint = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: port))
+                let key = TransportPeerKey(address: endpoint, generation: 0)
+                group.addTask {
+                    do {
+                        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                            commands.submit(.send(key, [[0xfe]], .reliableOrdered, 0, .immediate, continuation))
+                            _ = submitted.continuation.yield(())
+                        }
+                        return false
+                    } catch {
+                        return error as? RakNetTransportError == .sendQueueFull
+                    }
+                }
+            }
+            var rejected = 0
+            for await didReject in group where didReject { rejected += 1 }
+            return rejected
+        }
+    }
+    for await _ in submitted.stream.prefix(total) {}
+    let queued = commands.drain()
+    for command in queued { command.stop() }
+    #expect(queued.count == 364)
+    #expect(await pending.value == 16)
+}

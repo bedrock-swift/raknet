@@ -18,7 +18,7 @@ public final class RakNetListener: Sendable {
     ) {
         localAddress = socket.localAddress
         let accepted = TransportInbox<RakNetConnection>(limit: quota.maximum, byteLimit: quota.maximum)
-        let commands = TransportCommands()
+        let commands = TransportCommands(peerLimit: quota.maximum)
         self.accepted = accepted
         self.commands = commands
         let advertisement = TransportAdvertisement(

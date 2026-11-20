@@ -57,6 +57,8 @@ Use `listener.block(_:for:)` and `listener.unblock(_:)` to control access by IP 
 
 Read `connection.roundTripTime` for the smoothed RTT once a measurement is available.
 
+A send can report `sendQueueFull` when pending commands reach a transport limit or `sendWindowFull` when the peer’s reliable window is full. In either case the batch can be retried after the queue drains or acknowledgements arrive.
+
 Send defaults to reliable ordered delivery and immediate priority. Pass `priority` to schedule high, normal, or low priority sends. Ordered delivery is still preserved within each channel. Pass `reliability` and `channel` to select a different mode. Send several payloads with `try await connection.sendBatch(payloads)` to pack their frames into datagrams up to the negotiated MTU. Unreliable payloads that require fragmentation use the corresponding reliable mode.
 
 Use `RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 19132))` for IPv6 loopback.
