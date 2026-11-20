@@ -6,6 +6,7 @@ A RakNet transport library for Minecraft: Bedrock Edition, written in Swift.
 
 [![Swift 6](https://img.shields.io/badge/Swift-6-orange?style=flat-square&logo=swift)](https://www.swift.org)
 [![RakNet transport](https://img.shields.io/badge/transport-RakNet-black?style=flat-square)](#features)
+[![MIT license](https://img.shields.io/github/license/bedrock-swift/raknet?style=flat-square)](LICENSE)
 
 </div>
 
