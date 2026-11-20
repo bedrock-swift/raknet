@@ -218,7 +218,7 @@ struct TransportDriver {
     private var peers: [RakNetEndpoint: Peer] = [:]
     private var connectionsByHost: [ListenerHost: Int] = [:]
     private var generation: UInt64 = 0
-    private var cookies = OfflineCookies()
+    private var handshake: OfflineServerHandshake?
     private var offlineRate: OfflinePacketRate?
     private var dial: DialAttempt?
 
@@ -231,8 +231,9 @@ struct TransportDriver {
         self.commands = commands
         if case let .dial(address, mtu, timeout) = role {
             dial = DialAttempt(address: address, mtu: mtu, timeout: timeout)
-        } else if case let .listen(listener) = role, let limits = listener.offlinePacketLimits {
-            offlineRate = OfflinePacketRate(limits: limits)
+        } else if case let .listen(listener) = role {
+            handshake = OfflineServerHandshake(server: listener.server, useCookies: listener.useCookies)
+            offlineRate = listener.offlinePacketLimits.map { OfflinePacketRate(limits: $0) }
         }
     }
 
@@ -292,7 +293,9 @@ struct TransportDriver {
             guard !listener.access.isBlocked(address) else { return }
             if header & 0x80 == 0 {
                 guard offlineRate?.allow(address, at: now) != false else { return }
-                if let response = offlineResponse(datagram, from: address, listener: listener, at: now) {
+                if let response = handshake?.receive(datagram, from: address, at: now, advertisement: {
+                    listener.advertisement.data(for: address)
+                }) {
                     handleOffline(response, from: address, at: now, listener: listener)
                 }
                 return
@@ -361,24 +364,6 @@ struct TransportDriver {
             peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
         case nil:
             break
-        }
-    }
-
-    private mutating func offlineResponse(
-        _ datagram: [UInt8], from address: RakNetEndpoint, listener: Listener, at now: UInt64
-    ) -> OfflineServer.Response? {
-        let server = listener.server
-        switch datagram.first {
-        case OfflineWire.openRequestOne where listener.useCookies:
-            guard let response = server.receive(datagram, from: address) else { return nil }
-            guard response.datagram.first == OfflineWire.openReplyOne else { return response }
-            guard let cookie = cookies.issue(to: address, at: now) else { return nil }
-            return server.receive(datagram, from: address, cookie: cookie)
-        case OfflineWire.openRequestTwo where listener.useCookies:
-            guard let cookie = cookies.value(for: address, at: now) else { return nil }
-            return server.receive(datagram, from: address, cookie: cookie)
-        default:
-            return server.receive(datagram, from: address, cookie: nil) { listener.advertisement.data(for: address) }
         }
     }
 

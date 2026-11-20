@@ -1,5 +1,5 @@
-struct OfflineCookies {
-    private struct Challenge {
+struct OfflineCookies: Sendable {
+    private struct Challenge: Sendable {
         let value: UInt32
         let expiresAt: UInt64
     }

@@ -51,3 +51,23 @@ import Testing
         return
     }
 }
+
+@Test func offlineHandshakeValidatesCookiesWithoutSocketIO() throws {
+    let address = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 19132))
+    let clientAddress = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50000))
+    let otherPort = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50001))
+    var client = OfflineClient(server: address, guid: -123)
+    let server = try OfflineServer(guid: 42, advertisement: [])
+    var handshake = OfflineServerHandshake(server: server)
+    let probe = try client.probe()
+    let challenge = handshake.receive(probe, from: clientAddress, at: 1)
+    let response = try #require(challenge)
+    guard case let .send(request) = try client.receive(response.datagram, from: address) else {
+        Issue.record("missing cookie-bearing request")
+        return
+    }
+    let refused = handshake.receive(request, from: otherPort, at: 2)
+    #expect(refused == nil)
+    let accepted = handshake.receive(request, from: clientAddress, at: 3)
+    #expect(accepted?.negotiation?.clientGUID == -123)
+}
