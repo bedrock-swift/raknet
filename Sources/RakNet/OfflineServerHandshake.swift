@@ -1,7 +1,7 @@
 public struct OfflineServerHandshake: Sendable {
     private let server: OfflineServer
     private let useCookies: Bool
-    private var cookies = OfflineCookies()
+    private let cookies = OfflineCookies()
 
     public init(server: OfflineServer, useCookies: Bool = true) {
         self.server = server
@@ -21,10 +21,12 @@ public struct OfflineServerHandshake: Sendable {
         case OfflineWire.openRequestOne where useCookies:
             guard let response = server.receive(datagram, from: address) else { return nil }
             guard response.datagram.first == OfflineWire.openReplyOne else { return response }
-            guard let cookie = cookies.issue(to: address, at: milliseconds) else { return nil }
+            let cookie = cookies.issue(to: address, at: milliseconds)
             return server.receive(datagram, from: address, cookie: cookie)
         case OfflineWire.openRequestTwo where useCookies:
-            guard let cookie = cookies.value(for: address, at: milliseconds) else { return nil }
+            guard datagram.count >= 21 else { return nil }
+            let cookie = UInt32(wireBytes: datagram[17..<21])
+            guard cookies.accepts(cookie, from: address, at: milliseconds) else { return nil }
             return server.receive(datagram, from: address, cookie: cookie)
         default:
             return server.receive(datagram, from: address, cookie: nil, advertisement: advertisement)

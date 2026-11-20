@@ -1,18 +1,25 @@
 @testable import RakNet
 import Testing
 
-@Test func offlineCookiesReuseChallengesAndExpire() throws {
+@Test func statelessCookiesBindAnEndpointAndRotate() {
     let first = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 10001))
     let second = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 10002))
-    var cookies = OfflineCookies(maximumPending: 1, lifetime: 5)
-    let issued = cookies.issue(to: first, at: 10)
-    let value = try #require(issued)
+    let cookies = OfflineCookies(key0: 1, key1: 2)
+    let value = cookies.issue(to: first, at: 1)
+    for i in 0..<1024 {
+        _ = cookies.issue(to: .ipv4(IPv4Endpoint(address: UInt32(i), port: 10001)), at: 2)
+    }
+    #expect(cookies.accepts(value, from: first, at: 4_999))
+    #expect(cookies.accepts(value, from: first, at: 5_000))
+    #expect(!cookies.accepts(value, from: second, at: 5_000))
+    #expect(!cookies.accepts(value, from: first, at: 10_000))
+}
 
-    #expect(cookies.issue(to: first, at: 14) == value)
-    #expect(cookies.value(for: second, at: 14) == nil)
-    #expect(cookies.issue(to: second, at: 14) == nil)
-    #expect(cookies.issue(to: second, at: 15) != nil)
-    #expect(cookies.value(for: first, at: 15) == nil)
+@Test func cookieHashMatchesSipHash24Vectors() {
+    let key0: UInt64 = 0x0706_0504_0302_0100
+    let key1: UInt64 = 0x0f0e_0d0c_0b0a_0908
+    #expect(OfflineCookies.tag([], key0: key0, key1: key1) == 0x726f_db47_dd0e_0e31)
+    #expect(OfflineCookies.tag(Array(UInt8(0)..<15), key0: key0, key1: key1) == 0xa129_ca61_49be_45e5)
 }
 
 @Test func listenerRejectsInvalidCookieAndDifferentSourcePort() throws {
