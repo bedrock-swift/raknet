@@ -2,6 +2,16 @@ import Dispatch
 import Foundation
 
 public final class RakNetListener: Sendable {
+    public struct OfflinePacketLimits: Equatable, Sendable {
+        public let perIP: UInt32
+        public let total: UInt32
+
+        public init(perIP: UInt32 = 120, total: UInt32 = 100_000) {
+            self.perIP = perIP
+            self.total = total
+        }
+    }
+
     public let localAddress: RakNetEndpoint
 
     private let accepted: TransportInbox<RakNetConnection>
@@ -10,7 +20,8 @@ public final class RakNetListener: Sendable {
     private let access = ListenerAccess()
 
     private init(
-        socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16, maximumConnections: Int, useCookies: Bool
+        socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16, maximumConnections: Int, useCookies: Bool,
+        offlinePacketLimits: OfflinePacketLimits?
     ) {
         localAddress = socket.localAddress
         let accepted = TransportInbox<RakNetConnection>(limit: maximumConnections, byteLimit: maximumConnections)
@@ -26,7 +37,7 @@ public final class RakNetListener: Sendable {
             socket: socket,
             role: .listen(.init(
                 server: server, advertisement: advertisement, access: access,
-                maximumConnections: maximumConnections, useCookies: useCookies
+                maximumConnections: maximumConnections, useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
             )),
             accepted: accepted, commands: commands
         )
@@ -38,11 +49,12 @@ public final class RakNetListener: Sendable {
         advertisement: [UInt8] = [],
         maximumMTU: UInt16 = RakNetMTU.defaultValue,
         maximumConnections: Int = 128,
-        useCookies: Bool = true
+        useCookies: Bool = true,
+        offlinePacketLimits: OfflinePacketLimits? = .init()
     ) throws -> RakNetListener {
         try listen(
             on: .ipv4(address), guid: guid, advertisement: advertisement, maximumMTU: maximumMTU,
-            maximumConnections: maximumConnections, useCookies: useCookies
+            maximumConnections: maximumConnections, useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
         )
     }
 
@@ -52,7 +64,8 @@ public final class RakNetListener: Sendable {
         advertisement: [UInt8] = [],
         maximumMTU: UInt16 = RakNetMTU.defaultValue,
         maximumConnections: Int = 128,
-        useCookies: Bool = true
+        useCookies: Bool = true,
+        offlinePacketLimits: OfflinePacketLimits? = .init()
     ) throws -> RakNetListener {
         guard (1...4096).contains(maximumConnections) else { throw RakNetTransportError.invalidConnectionLimit }
         let server = try OfflineServer(
@@ -61,7 +74,7 @@ public final class RakNetListener: Sendable {
         let socket = try UDPSocket(bindTo: address, receiveTimeout: 20)
         return RakNetListener(
             socket: socket, server: server, maximumMTU: maximumMTU,
-            maximumConnections: maximumConnections, useCookies: useCookies
+            maximumConnections: maximumConnections, useCookies: useCookies, offlinePacketLimits: offlinePacketLimits
         )
     }
 
@@ -132,6 +145,7 @@ struct TransportDriver {
         let access: ListenerAccess
         let maximumConnections: Int
         let useCookies: Bool
+        let offlinePacketLimits: RakNetListener.OfflinePacketLimits?
     }
 
     enum Role: Sendable {
@@ -173,6 +187,7 @@ struct TransportDriver {
     private var peers: [RakNetEndpoint: Peer] = [:]
     private var generation: UInt64 = 0
     private var cookies = OfflineCookies()
+    private var offlineRate: OfflinePacketRate?
     private var dial: DialAttempt?
 
     private init(
@@ -184,6 +199,8 @@ struct TransportDriver {
         self.commands = commands
         if case let .dial(address, mtu, timeout) = role {
             dial = DialAttempt(address: address, mtu: mtu, timeout: timeout)
+        } else if case let .listen(listener) = role, let limits = listener.offlinePacketLimits {
+            offlineRate = OfflinePacketRate(limits: limits)
         }
     }
 
@@ -218,10 +235,14 @@ struct TransportDriver {
     }
 
     private mutating func receive(_ datagram: [UInt8], from address: RakNetEndpoint, at now: UInt64) throws {
+        guard let header = datagram.first else { return }
         if case let .listen(listener) = role {
             guard !listener.access.isBlocked(address) else { return }
-            if let response = offlineResponse(datagram, from: address, listener: listener, at: now) {
-                handleOffline(response, from: address, at: now, maximumConnections: listener.maximumConnections)
+            if header & 0x80 == 0 {
+                guard offlineRate?.allow(address, at: now) != false else { return }
+                if let response = offlineResponse(datagram, from: address, listener: listener, at: now) {
+                    handleOffline(response, from: address, at: now, maximumConnections: listener.maximumConnections)
+                }
                 return
             }
         }
@@ -230,7 +251,7 @@ struct TransportDriver {
             try receiveDialReply(datagram, from: address, at: now)
             return
         }
-        guard let header = datagram.first, header & 0x80 != 0 else { return }
+        guard header & 0x80 != 0 else { return }
         do {
             let input = try peer.connection.receive(datagram, from: address, at: now)
             try send(input.replies, to: address)

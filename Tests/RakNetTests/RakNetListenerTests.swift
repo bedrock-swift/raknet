@@ -55,3 +55,20 @@ import Testing
     #expect(!access.isBlocked(other, at: now))
     #expect(!access.isBlocked(first, at: now.advanced(by: .seconds(1))))
 }
+
+@Test func offlineRateLimitsEachIPAndTheWholeListener() {
+    let first = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 1000))
+    let second = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 1001))
+    let third = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000002, port: 1000))
+    var rate = OfflinePacketRate(limits: .init(perIP: 1, total: 2))
+
+    let fourth = RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 1000))
+    let attempts: [(RakNetEndpoint, UInt64, Bool)] = [
+        (first, 0, true), (second, 1, false), (third, 1, true), (fourth, 999, false),
+        (second, 1_000, true), (third, 1_000, true)
+    ]
+    for (endpoint, now, expected) in attempts {
+        let allowed = rate.allow(endpoint, at: now)
+        #expect(allowed == expected)
+    }
+}
