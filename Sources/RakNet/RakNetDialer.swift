@@ -1,23 +1,26 @@
 public extension RakNetConnection {
     static func dial(
-        _ host: String, port: UInt16, mtu: UInt16 = RakNetMTU.defaultValue, timeout: Duration = .seconds(5)
+        _ host: String, port: UInt16, mtu: UInt16 = RakNetMTU.defaultValue,
+        timeout: Duration = .seconds(5), protocolVersion: UInt8 = 11
     ) async throws -> RakNetConnection {
         guard OfflineWire.mtuRange.contains(mtu) else { throw OfflineClient.HandshakeError.invalidMTU }
         return try await withResolvedPeer(host, port: port, timeout: timeout) { endpoint, remaining in
-            try await dial(endpoint, mtu: mtu, timeout: remaining)
+            try await dial(endpoint, mtu: mtu, timeout: remaining, protocolVersion: protocolVersion)
         }
     }
 
     static func dial(
-        _ address: IPv4Endpoint, mtu: UInt16 = RakNetMTU.defaultValue, timeout: Duration = .seconds(5)
+        _ address: IPv4Endpoint, mtu: UInt16 = RakNetMTU.defaultValue,
+        timeout: Duration = .seconds(5), protocolVersion: UInt8 = 11
     ) async throws -> RakNetConnection {
-        try await dial(.ipv4(address), mtu: mtu, timeout: timeout)
+        try await dial(.ipv4(address), mtu: mtu, timeout: timeout, protocolVersion: protocolVersion)
     }
 
     static func dial(
         _ endpoint: RakNetEndpoint,
         mtu: UInt16 = RakNetMTU.defaultValue,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = .seconds(5),
+        protocolVersion: UInt8 = 11
     ) async throws -> RakNetConnection {
         try Task.checkCancellation()
         let address = endpoint.socketPeer
@@ -28,7 +31,9 @@ public extension RakNetConnection {
         guard timeout > .zero else { throw RakNetTransportError.timedOut }
 
         let socket = try UDPSocket(clientFor: address)
-        return try await startClient(socket: socket, role: .dial(address, mtu: mtu, timeout: timeout))
+        return try await startClient(
+            socket: socket, role: .dial(address, mtu: mtu, timeout: timeout, protocolVersion: protocolVersion)
+        )
     }
 
     static func resume(_ snapshot: RakNetSessionSnapshot) async throws -> RakNetConnection {
@@ -71,11 +76,11 @@ struct DialAttempt {
     private var probes = 0
     private var nextSend: UInt64 = 0
 
-    init(address: RakNetEndpoint, mtu: UInt16, timeout: Duration) {
+    init(address: RakNetEndpoint, mtu: UInt16, timeout: Duration, protocolVersion: UInt8 = 11) {
         self.address = address
         self.timeout = timeout
         sizes = [mtu] + [UInt16(1200), 576].filter { $0 < mtu }
-        client = OfflineClient(server: address)
+        client = OfflineClient(server: address, protocolVersion: protocolVersion)
     }
 
     var expired: Bool { started.duration(to: .now) >= timeout }

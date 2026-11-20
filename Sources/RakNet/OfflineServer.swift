@@ -2,6 +2,7 @@ public struct OfflineServer: Sendable {
     public enum ConfigurationError: Error, Equatable {
         case invalidMTU
         case advertisementTooLong
+        case emptyProtocolList
     }
 
     public struct Response: Sendable {
@@ -17,6 +18,7 @@ public struct OfflineServer: Sendable {
     private let guid: [UInt8]
     let advertisement: [UInt8]
     private let protocolVersion: UInt8
+    private let supportedProtocols: Set<UInt8>
     private let maximumMTU: UInt16
 
     public init(
@@ -26,20 +28,31 @@ public struct OfflineServer: Sendable {
         maximumMTU: UInt16 = RakNetMTU.defaultValue
     ) throws {
         try self.init(
-            guid: guid, advertisement: advertisement, protocolVersion: protocolVersion,
+            guid: guid, advertisement: advertisement, supportedProtocols: [protocolVersion],
+            maximumMTU: maximumMTU, udpOverhead: OfflineWire.ipv4UDPOverhead
+        )
+    }
+
+    public init(
+        guid: UInt64, advertisement: [UInt8], supportedProtocols: [UInt8], maximumMTU: UInt16 = RakNetMTU.defaultValue
+    ) throws {
+        try self.init(
+            guid: guid, advertisement: advertisement, supportedProtocols: supportedProtocols,
             maximumMTU: maximumMTU, udpOverhead: OfflineWire.ipv4UDPOverhead
         )
     }
 
     init(
-        guid: UInt64, advertisement: [UInt8], protocolVersion: UInt8 = 11, maximumMTU: UInt16, udpOverhead: Int
+        guid: UInt64, advertisement: [UInt8], supportedProtocols: [UInt8], maximumMTU: UInt16, udpOverhead: Int
     ) throws {
         guard OfflineWire.mtuRange.contains(maximumMTU) else {
             throw ConfigurationError.invalidMTU
         }
         self.guid = bigEndianBytes(guid)
         self.advertisement = try Self.encodeAdvertisement(advertisement, maximumMTU: maximumMTU, udpOverhead: udpOverhead)
+        guard let protocolVersion = supportedProtocols.first else { throw ConfigurationError.emptyProtocolList }
         self.protocolVersion = protocolVersion
+        self.supportedProtocols = Set(supportedProtocols)
         self.maximumMTU = maximumMTU
     }
 
@@ -84,7 +97,7 @@ public struct OfflineServer: Sendable {
             guard datagram.count >= 18, datagram[1..<17].elementsEqual(OfflineWire.magic) else {
                 return nil
             }
-            guard datagram[17] == protocolVersion else {
+            guard supportedProtocols.contains(datagram[17]) else {
                 return Response(datagram: [0x19, protocolVersion] + OfflineWire.magic + guid, negotiation: nil)
             }
             let headerSize = sender.udpOverhead

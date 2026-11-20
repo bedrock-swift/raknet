@@ -49,6 +49,7 @@ public final class RakNetListener: Sendable {
         on address: IPv4Endpoint,
         guid: UInt64 = .random(in: 1...UInt64(Int64.max)),
         advertisement: [UInt8] = [],
+        supportedProtocols: [UInt8] = [11],
         maximumMTU: UInt16 = RakNetMTU.defaultValue,
         maximumConnections: Int = 128,
         maximumConnectionsPerIP: Int? = nil,
@@ -57,7 +58,8 @@ public final class RakNetListener: Sendable {
         onlinePacketsPerSecond: UInt32? = 10_000
     ) throws -> RakNetListener {
         try listen(
-            on: .ipv4(address), guid: guid, advertisement: advertisement, maximumMTU: maximumMTU,
+            on: .ipv4(address), guid: guid, advertisement: advertisement, supportedProtocols: supportedProtocols,
+            maximumMTU: maximumMTU,
             maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
             useCookies: useCookies, offlinePacketLimits: offlinePacketLimits, onlinePacketsPerSecond: onlinePacketsPerSecond
         )
@@ -67,6 +69,7 @@ public final class RakNetListener: Sendable {
         on address: RakNetEndpoint,
         guid: UInt64 = .random(in: 1...UInt64(Int64.max)),
         advertisement: [UInt8] = [],
+        supportedProtocols: [UInt8] = [11],
         maximumMTU: UInt16 = RakNetMTU.defaultValue,
         maximumConnections: Int = 128,
         maximumConnectionsPerIP: Int? = nil,
@@ -79,7 +82,8 @@ public final class RakNetListener: Sendable {
             throw RakNetTransportError.invalidConnectionLimit
         }
         let server = try OfflineServer(
-            guid: guid, advertisement: advertisement, maximumMTU: maximumMTU, udpOverhead: address.udpOverhead
+            guid: guid, advertisement: advertisement, supportedProtocols: supportedProtocols,
+            maximumMTU: maximumMTU, udpOverhead: address.udpOverhead
         )
         let socket = try UDPSocket(bindTo: address, receiveTimeout: 20)
         return RakNetListener(
@@ -170,7 +174,7 @@ struct TransportDriver {
 
     enum Role: Sendable {
         case listen(Listener)
-        case dial(RakNetEndpoint, mtu: UInt16, timeout: Duration)
+        case dial(RakNetEndpoint, mtu: UInt16, timeout: Duration, protocolVersion: UInt8)
         case resume
 
         var isClient: Bool {
@@ -229,8 +233,8 @@ struct TransportDriver {
         self.role = role
         self.accepted = accepted
         self.commands = commands
-        if case let .dial(address, mtu, timeout) = role {
-            dial = DialAttempt(address: address, mtu: mtu, timeout: timeout)
+        if case let .dial(address, mtu, timeout, protocolVersion) = role {
+            dial = DialAttempt(address: address, mtu: mtu, timeout: timeout, protocolVersion: protocolVersion)
         } else if case let .listen(listener) = role {
             handshake = OfflineServerHandshake(server: listener.server, useCookies: listener.useCookies)
             offlineRate = listener.offlinePacketLimits.map { OfflinePacketRate(limits: $0) }

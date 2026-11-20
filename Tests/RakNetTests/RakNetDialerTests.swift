@@ -146,3 +146,19 @@ private func expectWithin<T: Sendable>(
     #expect(next == [0xfe, 3])
     try await resumed.close()
 }
+
+@Test(.timeLimit(.minutes(1))) func listenerNegotiatesConfiguredProtocolVersions() async throws {
+    let address = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let listener = try RakNetListener.listen(on: address, supportedProtocols: [10, 11])
+    defer { listener.close() }
+
+    for version in [UInt8(10), 11] {
+        let client = try await RakNetConnection.dial(listener.localAddress, protocolVersion: version)
+        let incoming = try await expectWithin("accept configured version") { try await listener.accept() }
+        #expect(incoming?.remoteAddress == client.localAddress)
+        try await client.close()
+    }
+    await #expect(throws: OfflineClient.HandshakeError.incompatibleProtocol(10)) {
+        try await RakNetConnection.dial(listener.localAddress, protocolVersion: 9)
+    }
+}
