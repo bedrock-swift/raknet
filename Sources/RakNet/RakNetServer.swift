@@ -163,14 +163,19 @@ public struct RakNetServer: Sendable {
 
     private mutating func receiveOffline(_ datagram: [UInt8], from address: RakNetEndpoint, at time: UInt64) -> Output {
         guard let response = handshake.receive(datagram, from: address, at: time) else { return Output() }
-        if let negotiation = response.negotiation, peers[address] == nil {
-            guard let connection = try? OnlineConnection(
-                      accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
-                  ) else { return Output() }
-            do {
-                try install(connection, mtu: negotiation.mtu, at: time)
-            } catch {
-                return Output()
+        if let negotiation = response.negotiation {
+            if let existing = peers[address] {
+                guard existing.mtu == negotiation.mtu,
+                      existing.connection.acceptsHandshakeRetry(clientGUID: negotiation.clientGUID) else { return Output() }
+            } else {
+                do {
+                    let connection = try OnlineConnection(
+                        accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
+                    )
+                    try install(connection, mtu: negotiation.mtu, at: time)
+                } catch {
+                    return Output()
+                }
             }
         }
         return Output(datagrams: [Datagram(destination: address, bytes: response.datagram)])

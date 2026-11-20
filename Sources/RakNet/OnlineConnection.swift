@@ -22,7 +22,7 @@ public struct OnlineConnection: Sendable {
         case idle(clientGUID: Int64)
         case awaitingRequest(clientGUID: Int64)
         case awaitingAcceptance(requestTime: UInt64)
-        case awaitingConfirmation(serverTime: UInt64)
+        case awaitingConfirmation(clientGUID: Int64, serverTime: UInt64)
         case open
         case closing
         case closed
@@ -101,6 +101,13 @@ public struct OnlineConnection: Sendable {
 
     func archive(at capturedAt: UInt64) throws -> Archive {
         Archive(sessionTime: sessionTime(capturedAt), pendingPing: pendingPing, session: try session.archive())
+    }
+
+    func acceptsHandshakeRetry(clientGUID: Int64) -> Bool {
+        switch state {
+        case let .awaitingRequest(guid), let .awaitingConfirmation(guid, _): guid == clientGUID
+        default: false
+        }
     }
 
     public var isOpen: Bool { state == .open }
@@ -219,7 +226,7 @@ public struct OnlineConnection: Sendable {
             reply += packet[9..<17]
             reply += bigEndianBytes(time)
             input.replies += try session.send(reply, at: time)
-            state = .awaitingConfirmation(serverTime: time)
+            state = .awaitingConfirmation(clientGUID: guid, serverTime: time)
         case let (.awaitingAcceptance(requestTime), 0x10):
             guard let times = Self.timestamps(in: packet, includesSystemIndex: true),
                   times.echoed == requestTime else { return } // request timestamp echo
@@ -228,7 +235,7 @@ public struct OnlineConnection: Sendable {
             input.replies += try session.send(reply, at: time)
             state = .open
             input.opened = true
-        case let (.awaitingConfirmation(serverTime), 0x13):
+        case let (.awaitingConfirmation(_, serverTime), 0x13):
             guard let times = Self.timestamps(in: packet, includesSystemIndex: false),
                   times.echoed == serverTime else { return } // acceptance timestamp echo
             state = .open

@@ -367,11 +367,16 @@ struct TransportDriver {
         _ response: OfflineServer.Response, from address: RakNetEndpoint, at now: UInt64, listener: Listener
     ) {
         do {
-            if let negotiation = response.negotiation, peers[address] == nil {
-                let connection = try OnlineConnection(
-                    accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
-                )
-                _ = try register(connection, mtu: negotiation.mtu, listener: listener, at: now)
+            if let negotiation = response.negotiation {
+                if let existing = peers[address] {
+                    guard existing.mtu == negotiation.mtu,
+                          existing.connection.acceptsHandshakeRetry(clientGUID: negotiation.clientGUID) else { return }
+                } else {
+                    let connection = try OnlineConnection(
+                        accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
+                    )
+                    _ = try register(connection, mtu: negotiation.mtu, listener: listener, at: now)
+                }
             }
             try socket.send(response.datagram, to: address)
         } catch {

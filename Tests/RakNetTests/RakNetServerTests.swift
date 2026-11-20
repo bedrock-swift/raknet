@@ -41,6 +41,8 @@ private func simulateClient(
         throw OnlineConnection.ConnectionError.invalidState
     }
     let offer = server.receive(request, from: address, at: time + 1)
+    let retry = server.receive(request, from: address, at: time + 1)
+    #expect(retry == offer)
     let second = try #require(offer.datagrams.first)
     guard case let .negotiated(negotiation) = try offline.receive(second.bytes, from: endpoint) else {
         throw OnlineConnection.ConnectionError.invalidState
@@ -52,7 +54,11 @@ private func simulateClient(
         var toClient: [RakNetServer.Datagram] = []
         for packet in toServer {
             let output = server.receive(packet, from: address, at: now)
-            if output.events.contains(.connected(address, mtu: negotiation.mtu)) { return client }
+            if output.events.contains(.connected(address, mtu: negotiation.mtu)) {
+                let stale = server.receive(request, from: address, at: now)
+                #expect(stale.datagrams.isEmpty)
+                return client
+            }
             toClient += output.datagrams
         }
         toClient += server.update(at: now).datagrams
