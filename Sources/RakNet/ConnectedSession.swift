@@ -65,6 +65,14 @@ public struct ConnectedSession: Sendable {
         peerDatagramLimit = Int(mtu) // peer udp mtu convention
     }
 
+    public var roundTripTime: Duration? {
+        retransmissionTimer.smoothed.map { .milliseconds(Int64($0)) }
+    }
+
+    mutating func observeRoundTripTime(_ milliseconds: UInt64) {
+        retransmissionTimer.observe(milliseconds)
+    }
+
     public mutating func send(_ payload: [UInt8], at milliseconds: UInt64) throws -> [[UInt8]] {
         try send(payload, reliability: .reliableOrdered, at: milliseconds)
     }
@@ -138,7 +146,7 @@ public struct ConnectedSession: Sendable {
                 let elapsed = milliseconds - packet.sentAt
                 sample = min(sample ?? elapsed, elapsed) // one sample per acknowledgement
             }
-            if let sample { retransmissionTimer.observe(sample) }
+            if let sample { observeRoundTripTime(sample) }
             return Input()
         case let .negativeAcknowledgement(sequences):
             return Input(replies: try resend(sequences, at: milliseconds))

@@ -27,6 +27,7 @@ public struct OnlineConnection: Sendable {
     public let peer: IPv4Endpoint
     private var state: State
     private var session: ConnectedSession
+    private var pendingPing: UInt64?
 
     public init(accepting client: IPv4Endpoint, negotiation: OfflineServer.Negotiation) throws {
         peer = client
@@ -42,6 +43,7 @@ public struct OnlineConnection: Sendable {
 
     public var isOpen: Bool { state == .open }
     public var isClosed: Bool { state == .closed }
+    public var roundTripTime: Duration? { session.roundTripTime }
 
     public mutating func start(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard case let .idle(guid) = state else { throw ConnectionError.invalidState }
@@ -74,8 +76,9 @@ public struct OnlineConnection: Sendable {
         return try session.retransmit(at: milliseconds)
     }
 
-    mutating func keepalive(at milliseconds: UInt64) -> [UInt8]? {
+    public mutating func keepalive(at milliseconds: UInt64) -> [UInt8]? {
         guard isOpen else { return nil }
+        pendingPing = milliseconds
         return session.sendControl([0x00] + bigEndianBytes(milliseconds))
     }
 
@@ -130,11 +133,16 @@ public struct OnlineConnection: Sendable {
             let pong = [0x03] + packet[1..<9] + bigEndianBytes(time)
             input.replies.append(session.sendControl(pong))
         case (.open, 0x04):
-            input.replies.append(session.sendControl([0x00] + bigEndianBytes(time)))
+            if let ping = keepalive(at: time) { input.replies.append(ping) }
+        case (.open, 0x03):
+            guard packet.count == 17, let pendingPing, time >= pendingPing,
+                  UInt64(wireBytes: packet[1..<9]) == pendingPing else { return } // outstanding ping echo
+            self.pendingPing = nil
+            session.observeRoundTripTime(time - pendingPing)
         case (_, 0x15):
             state = .closed
             input.closed = true
-        case (.open, 0x03), (.open, 0x09), (.open, 0x10), (.open, 0x13):
+        case (.open, 0x09), (.open, 0x10), (.open, 0x13):
             break
         case (.open, _):
             input.payloads.append(packet)

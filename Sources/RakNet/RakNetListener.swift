@@ -66,6 +66,7 @@ struct TransportDriver {
         let key: TransportPeerKey
         let mtu: UInt16
         let messages = TransportInbox<[UInt8]>(limit: 64, byteLimit: 512 * 1024)
+        let metrics = TransportMetrics()
         var connection: OnlineConnection
         var lastPacket: UInt64
         var nextPing: UInt64
@@ -146,11 +147,12 @@ struct TransportDriver {
             let input = try peer.connection.receive(datagram, from: address, at: now)
             try send(input.replies, to: address)
             peer.lastPacket = now
+            peer.metrics.update(roundTripTime: peer.connection.roundTripTime)
             if input.opened {
                 dial = nil
                 let connection = RakNetConnection(
                     localAddress: socket.localAddress, key: peer.key, mtu: peer.mtu,
-                    messages: peer.messages, commands: commands
+                    messages: peer.messages, commands: commands, metrics: peer.metrics
                 )
                 guard accepted.offer(connection) else {
                     try send(try peer.connection.close(at: now), to: address)

@@ -20,6 +20,7 @@ import Testing
     try await server.send([0xfe, 0x42], reliability: .reliableSequenced, channel: 3)
     let reply = try await expectWithin("reply") { try await client.receive() }
     #expect(reply == [0xfe, 0x42])
+    #expect(client.roundTripTime != nil)
 
     try await client.close()
     let afterClose = try await expectWithin("close") { try await server.receive() }

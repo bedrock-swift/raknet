@@ -18,10 +18,11 @@ public final class RakNetConnection: Sendable {
     private let key: TransportPeerKey
     private let messages: TransportInbox<[UInt8]>
     private let commands: TransportCommands
+    private let metrics: TransportMetrics
 
     init(
         localAddress: IPv4Endpoint, key: TransportPeerKey, mtu: UInt16,
-        messages: TransportInbox<[UInt8]>, commands: TransportCommands
+        messages: TransportInbox<[UInt8]>, commands: TransportCommands, metrics: TransportMetrics
     ) {
         self.localAddress = localAddress
         remoteAddress = key.address
@@ -29,11 +30,14 @@ public final class RakNetConnection: Sendable {
         self.key = key
         self.messages = messages
         self.commands = commands
+        self.metrics = metrics
     }
 
     deinit {
         commands.submit(.close(key, nil))
     }
+
+    public var roundTripTime: Duration? { metrics.roundTripTime }
 
     public func send(_ payload: [UInt8]) async throws {
         try await send(payload, reliability: .reliableOrdered)
@@ -57,6 +61,19 @@ public final class RakNetConnection: Sendable {
         try await withCheckedThrowingContinuation { continuation in
             commands.submit(.close(key, continuation))
         }
+    }
+}
+
+final class TransportMetrics: @unchecked Sendable {
+    private let lock = NSLock()
+    private var measuredRTT: Duration?
+
+    var roundTripTime: Duration? {
+        lock.withLock { measuredRTT }
+    }
+
+    func update(roundTripTime: Duration?) {
+        lock.withLock { measuredRTT = roundTripTime }
     }
 }
 

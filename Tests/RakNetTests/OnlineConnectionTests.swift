@@ -50,11 +50,19 @@ import Testing
     }
     #expect(messages == [data])
 
-    for datagram in try client.close(at: 9) {
-        let input = try server.receive(datagram, from: clientAddress, at: 10)
+    let beforePing = try #require(client.roundTripTime)
+    let keepalive = client.keepalive(at: 10)
+    let ping = try #require(keepalive)
+    let pingResult = try server.receive(ping, from: clientAddress, at: 50)
+    let pong = try #require(pingResult.replies.first { $0.first == 0x84 })
+    _ = try client.receive(pong, from: serverAddress, at: 90)
+    #expect(try #require(client.roundTripTime) > beforePing)
+
+    for datagram in try client.close(at: 100) {
+        let input = try server.receive(datagram, from: clientAddress, at: 101)
         #expect(input.closed)
         for reply in input.replies {
-            _ = try client.receive(reply, from: serverAddress, at: 11)
+            _ = try client.receive(reply, from: serverAddress, at: 102)
         }
     }
     #expect(client.isClosed)
