@@ -17,3 +17,16 @@ import Testing
         try await RakNetEndpoint.resolve("localhost\0invalid", port: 19132)
     }
 }
+
+@Test func dialAndPingResolveLocalhost() async throws {
+    let endpoint = IPv4Endpoint(address: 0x7f000001, port: 0)
+    let listener = try RakNetListener.listen(on: endpoint, advertisement: [42])
+    defer { listener.close() }
+    let port = listener.localAddress.port
+    let pong = try await RakNetConnection.ping("localhost", port: port)
+    #expect(pong.advertisement == [42])
+
+    let client = try await RakNetConnection.dial("localhost", port: port)
+    #expect(client.remoteAddress == listener.localAddress)
+    try await client.close()
+}

@@ -7,6 +7,12 @@ public struct RakNetPong: Equatable, Sendable {
 }
 
 public extension RakNetConnection {
+    static func ping(_ host: String, port: UInt16, timeout: Duration = .seconds(3)) async throws -> RakNetPong {
+        try await withResolvedPeer(host, port: port, timeout: timeout) { endpoint, remaining in
+            try await ping(endpoint, timeout: remaining)
+        }
+    }
+
     static func ping(_ address: IPv4Endpoint, timeout: Duration = .seconds(3)) async throws -> RakNetPong {
         try await ping(.ipv4(address), timeout: timeout)
     }

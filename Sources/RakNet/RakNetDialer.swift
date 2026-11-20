@@ -1,5 +1,14 @@
 public extension RakNetConnection {
     static func dial(
+        _ host: String, port: UInt16, mtu: UInt16 = RakNetMTU.defaultValue, timeout: Duration = .seconds(5)
+    ) async throws -> RakNetConnection {
+        guard OfflineWire.mtuRange.contains(mtu) else { throw OfflineClient.HandshakeError.invalidMTU }
+        return try await withResolvedPeer(host, port: port, timeout: timeout) { endpoint, remaining in
+            try await dial(endpoint, mtu: mtu, timeout: remaining)
+        }
+    }
+
+    static func dial(
         _ address: IPv4Endpoint, mtu: UInt16 = RakNetMTU.defaultValue, timeout: Duration = .seconds(5)
     ) async throws -> RakNetConnection {
         try await dial(.ipv4(address), mtu: mtu, timeout: timeout)

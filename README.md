@@ -49,7 +49,7 @@ if let reply = try await connection.receive() {
 try await connection.close()
 ```
 
-Use `try await RakNetConnection.ping(address)` to read the server advertisement and round-trip time.
+Use `try await RakNetConnection.ping(address)` to read the server advertisement and round-trip time. Both `ping` and `dial` also accept a hostname or IP literal and a `port`.
 Use `listener.setAdvertisement(_:)` to update the advertisement or `listener.setAdvertisementProvider(_:)` to generate it per peer. If the provider returns an oversized advertisement, the listener uses the configured static bytes.
 
 Use `listener.block(_:for:)` and `listener.unblock(_:)` to control access by IP address. Set `offlinePacketLimits` to adjust the per-IP and listener-wide rates for discovery and offline handshakes.

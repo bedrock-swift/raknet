@@ -115,3 +115,52 @@ public enum RakNetEndpoint: Hashable, Sendable {
         }
     }
 }
+
+func withResolvedPeer<Value: Sendable>(
+    _ host: String, port: UInt16, timeout: Duration,
+    _ operation: @escaping @Sendable (RakNetEndpoint, Duration) async throws -> Value
+) async throws -> Value {
+    try Task.checkCancellation()
+    guard port != 0 else { throw RakNetTransportError.invalidRemoteAddress }
+    guard timeout > .zero else { throw RakNetTransportError.timedOut }
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+
+    return try await withThrowingTaskGroup(of: Value.self) { group in
+        group.addTask {
+            let endpoints = try await RakNetEndpoint.resolve(host, port: port)
+            return try await withThrowingTaskGroup(of: Result<Value, any Error>.self) { attempts in
+                let stagger = min(.milliseconds(150), timeout / 4)
+                for (index, endpoint) in endpoints.enumerated() {
+                    attempts.addTask {
+                        do {
+                            if index > 0 { try await Task.sleep(for: stagger * min(index, 3)) }
+                            let remaining = ContinuousClock.now.duration(to: deadline)
+                            guard remaining > .zero else { throw RakNetTransportError.timedOut }
+                            return .success(try await operation(endpoint, remaining))
+                        } catch {
+                            return .failure(error)
+                        }
+                    }
+                }
+
+                defer { attempts.cancelAll() }
+                var failure: (any Error)?
+                while let result = try await attempts.next() {
+                    try Task.checkCancellation()
+                    switch result {
+                    case let .success(value): return value
+                    case let .failure(error): if failure == nil { failure = error }
+                    }
+                }
+                throw failure ?? RakNetEndpoint.ResolutionError.noAddresses
+            }
+        }
+        group.addTask {
+            try await ContinuousClock().sleep(until: deadline)
+            throw RakNetTransportError.timedOut
+        }
+        defer { group.cancelAll() }
+        guard let value = try await group.next() else { throw CancellationError() }
+        return value
+    }
+}
