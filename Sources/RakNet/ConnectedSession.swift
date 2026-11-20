@@ -43,6 +43,8 @@ public struct ConnectedSession: Sendable {
 
     private let datagramLimit: Int
     private let peerDatagramLimit: Int
+    private let batchAcknowledgements: Bool
+    private var pendingAcknowledgements: Set<UInt32> = []
     private var nextDatagram: UInt32 = 0
     private var nextMessage: UInt32 = 0
     private var nextOrder = [UInt32](repeating: 0, count: 32)
@@ -59,10 +61,11 @@ public struct ConnectedSession: Sendable {
     private var fragments: [FragmentKey: Assembly] = [:]
     private var bufferedBytes = 0
 
-    public init(mtu: UInt16) throws {
+    public init(mtu: UInt16, batchAcknowledgements: Bool = false) throws {
         guard OfflineWire.mtuRange.contains(mtu) else { throw SessionError.invalidMTU }
         datagramLimit = Int(mtu) - OfflineWire.ipv4UDPOverhead
         peerDatagramLimit = Int(mtu) // peer udp mtu convention
+        self.batchAcknowledgements = batchAcknowledgements
     }
 
     public var roundTripTime: Duration? {
@@ -153,7 +156,14 @@ public struct ConnectedSession: Sendable {
         case let .frames(sequence, frames):
             let arrival = incoming.insert(sequence)
             guard arrival != .tooOld, arrival != .tooFar else { return Input() }
-            var input = Input(replies: [SessionDatagram.acknowledgement(sequence)])
+            var input = Input()
+            if batchAcknowledgements {
+                pendingAcknowledgements.insert(sequence)
+                if pendingAcknowledgements.count >= (datagramLimit - 3) / 4,
+                   let packet = flushAcknowledgements() { input.replies.append(packet) } // singleton record budget
+            } else {
+                input.replies.append(SessionDatagram.acknowledgement(sequence))
+            }
             guard case let .accepted(gap) = arrival else { return input }
             if gap > 0 {
                 input.replies.append(SessionDatagram.negativeAcknowledgement(before: sequence, count: gap))
@@ -163,6 +173,12 @@ public struct ConnectedSession: Sendable {
             }
             return input
         }
+    }
+
+    public mutating func flushAcknowledgements() -> [UInt8]? {
+        let packet = SessionDatagram.acknowledgement(pendingAcknowledgements)
+        pendingAcknowledgements.removeAll(keepingCapacity: true)
+        return packet
     }
 
     public mutating func retransmit(at milliseconds: UInt64) throws -> [[UInt8]] {

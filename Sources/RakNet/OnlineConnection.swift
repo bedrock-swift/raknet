@@ -29,16 +29,20 @@ public struct OnlineConnection: Sendable {
     private var session: ConnectedSession
     private var pendingPing: UInt64?
 
-    public init(accepting client: IPv4Endpoint, negotiation: OfflineServer.Negotiation) throws {
+    public init(
+        accepting client: IPv4Endpoint, negotiation: OfflineServer.Negotiation, batchAcknowledgements: Bool = false
+    ) throws {
         peer = client
         state = .awaitingRequest(clientGUID: negotiation.clientGUID)
-        session = try ConnectedSession(mtu: negotiation.mtu)
+        session = try ConnectedSession(mtu: negotiation.mtu, batchAcknowledgements: batchAcknowledgements)
     }
 
-    public init(connectingTo server: IPv4Endpoint, mtu: UInt16, clientGUID: Int64) throws {
+    public init(
+        connectingTo server: IPv4Endpoint, mtu: UInt16, clientGUID: Int64, batchAcknowledgements: Bool = false
+    ) throws {
         peer = server
         state = .idle(clientGUID: clientGUID)
-        session = try ConnectedSession(mtu: mtu)
+        session = try ConnectedSession(mtu: mtu, batchAcknowledgements: batchAcknowledgements)
     }
 
     public var isOpen: Bool { state == .open }
@@ -71,6 +75,10 @@ public struct OnlineConnection: Sendable {
         return packets
     }
 
+    public mutating func flushAcknowledgements() -> [UInt8]? {
+        session.flushAcknowledgements()
+    }
+
     public mutating func retransmit(at milliseconds: UInt64) throws -> [[UInt8]] {
         guard !isClosed else { return [] }
         return try session.retransmit(at: milliseconds)
@@ -93,11 +101,13 @@ public struct OnlineConnection: Sendable {
         if state == .closing, !session.hasPending {
             state = .closed
             input.closed = true
+            if let ack = flushAcknowledgements() { input.replies.append(ack) }
             return input
         }
         for payload in result.payloads {
             try handle(payload, at: milliseconds, into: &input)
         }
+        if input.closed, let ack = flushAcknowledgements() { input.replies.append(ack) }
         return input
     }
 

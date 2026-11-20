@@ -185,8 +185,28 @@ enum SessionDatagram {
     }
 
     static func acknowledgement(_ sequence: UInt32) -> [UInt8] {
-        var bytes: [UInt8] = [0xc0, 0, 1, 1]
-        bytes.appendSequence(sequence)
+        var bytes: [UInt8] = [0xc0, 0, 1]
+        bytes.appendRecord(sequence, sequence)
+        return bytes
+    }
+
+    static func acknowledgement(_ sequences: Set<UInt32>) -> [UInt8]? {
+        let sorted = sequences.sorted()
+        guard let start = sorted.first else { return nil }
+        var bytes: [UInt8] = [0xc0, 0, 0]
+        var records: UInt16 = 1
+        var first = start
+        var last = start
+        for sequence in sorted.dropFirst() {
+            if sequence != last + 1 {
+                bytes.appendRecord(first, last)
+                records += 1
+                first = sequence
+            }
+            last = sequence
+        }
+        bytes.appendRecord(first, last)
+        bytes.replaceSubrange(1..<3, with: bigEndianBytes(records))
         return bytes
     }
 }

@@ -84,3 +84,36 @@ import Testing
     #expect(try sender.retransmit(at: 600).isEmpty)
     #expect(try sender.retransmit(at: 601).count == 1)
 }
+
+@Test func sessionBatchesAcknowledgementsIntoRanges() throws {
+    var sender = try ConnectedSession(mtu: 400)
+    var receiver = try ConnectedSession(mtu: 400, batchAcknowledgements: true)
+    var packets: [[UInt8]] = []
+    for _ in 0..<5 { packets += try sender.send([0xfe], at: 0) }
+    for index in [0, 2, 2, 1, 4] {
+        let input = try receiver.receive(packets[index], at: 1)
+        #expect(input.replies.allSatisfy { $0.first == 0xa0 })
+    }
+
+    let flushed = receiver.flushAcknowledgements()
+    let ack = try #require(flushed)
+    #expect(ack == [0xc0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 1, 4, 0, 0])
+    #expect(receiver.flushAcknowledgements() == nil)
+    _ = try sender.receive(ack, at: 2)
+    #expect(try sender.retransmit(at: 300).count == 1)
+}
+
+@Test func sessionFlushesAcknowledgementsWithinMTU() throws {
+    var receiver = try ConnectedSession(mtu: 400, batchAcknowledgements: true)
+    var acknowledgements: [[UInt8]] = []
+    for i in 0..<100 {
+        let sequence = UInt8(i * 2)
+        let packet: [UInt8] = [0x84, sequence, 0, 0, 0, 0, 8, 0xfe]
+        let input = try receiver.receive(packet, at: 0)
+        acknowledgements += input.replies.filter { $0.first == 0xc0 }
+    }
+    #expect(acknowledgements.count == 1)
+    #expect(acknowledgements.first?.count == 371)
+    let remainder = receiver.flushAcknowledgements()
+    #expect(remainder?.count == 35)
+}

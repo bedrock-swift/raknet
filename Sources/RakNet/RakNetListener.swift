@@ -242,7 +242,9 @@ struct TransportDriver {
             try socket.send(packet, to: address)
         case let .negotiated(negotiation):
             let key = TransportPeerKey(address: address, generation: generation)
-            var connection = try OnlineConnection(connectingTo: address, mtu: negotiation.mtu, clientGUID: attempt.guid)
+            var connection = try OnlineConnection(
+                connectingTo: address, mtu: negotiation.mtu, clientGUID: attempt.guid, batchAcknowledgements: true
+            )
             try send(try connection.start(at: now), to: address)
             peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
         case nil:
@@ -276,7 +278,9 @@ struct TransportDriver {
                 guard peers.count < maximumConnections else { return }
                 let key = TransportPeerKey(address: address, generation: generation)
                 generation &+= 1 // reused udp endpoints
-                let connection = try OnlineConnection(accepting: address, negotiation: negotiation)
+                let connection = try OnlineConnection(
+                    accepting: address, negotiation: negotiation, batchAcknowledgements: true
+                )
                 peers[address] = Peer(key: key, mtu: negotiation.mtu, connection: connection, now: now)
             }
             try socket.send(response.datagram, to: address)
@@ -313,6 +317,7 @@ struct TransportDriver {
                 continue
             }
             do {
+                if let ack = peer.connection.flushAcknowledgements() { try socket.send(ack, to: address) }
                 try send(try peer.connection.retransmit(at: now), to: address)
                 if now >= peer.nextPing, let ping = peer.connection.keepalive(at: now) { // idle peer probe
                     try socket.send(ping, to: address)
