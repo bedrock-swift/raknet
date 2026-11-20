@@ -2,15 +2,7 @@ import Dispatch
 import Foundation
 
 public final class RakNetListener: Sendable {
-    public struct OfflinePacketLimits: Equatable, Sendable {
-        public let perIP: UInt32
-        public let total: UInt32
-
-        public init(perIP: UInt32 = 120, total: UInt32 = 100_000) {
-            self.perIP = perIP
-            self.total = total
-        }
-    }
+    public typealias OfflinePacketLimits = RakNetOfflinePacketLimits
 
     public let localAddress: RakNetEndpoint
 
@@ -21,11 +13,11 @@ public final class RakNetListener: Sendable {
 
     private init(
         socket: UDPSocket, server: OfflineServer, maximumMTU: UInt16,
-        maximumConnections: Int, maximumConnectionsPerIP: Int?, useCookies: Bool,
+        quota: ConnectionQuota, useCookies: Bool,
         offlinePacketLimits: OfflinePacketLimits?, onlinePacketsPerSecond: UInt32?
     ) {
         localAddress = socket.localAddress
-        let accepted = TransportInbox<RakNetConnection>(limit: maximumConnections, byteLimit: maximumConnections)
+        let accepted = TransportInbox<RakNetConnection>(limit: quota.maximum, byteLimit: quota.maximum)
         let commands = TransportCommands()
         self.accepted = accepted
         self.commands = commands
@@ -38,8 +30,7 @@ public final class RakNetListener: Sendable {
             socket: socket,
             role: .listen(.init(
                 server: server, advertisement: advertisement, access: access,
-                maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
-                useCookies: useCookies, offlinePacketLimits: offlinePacketLimits, onlinePacketsPerSecond: onlinePacketsPerSecond
+                quota: quota, useCookies: useCookies, offlinePacketLimits: offlinePacketLimits, onlinePacketsPerSecond: onlinePacketsPerSecond
             )),
             accepted: accepted, commands: commands
         )
@@ -77,18 +68,14 @@ public final class RakNetListener: Sendable {
         offlinePacketLimits: OfflinePacketLimits? = .init(),
         onlinePacketsPerSecond: UInt32? = 10_000
     ) throws -> RakNetListener {
-        guard (1...4096).contains(maximumConnections),
-              maximumConnectionsPerIP.map({ (1...4096).contains($0) }) ?? true else {
-            throw RakNetTransportError.invalidConnectionLimit
-        }
+        let quota = try ConnectionQuota(maximum: maximumConnections, perIP: maximumConnectionsPerIP)
         let server = try OfflineServer(
             guid: guid, advertisement: advertisement, supportedProtocols: supportedProtocols,
             maximumMTU: maximumMTU, udpOverhead: address.udpOverhead
         )
         let socket = try UDPSocket(bindTo: address, receiveTimeout: 20)
         return RakNetListener(
-            socket: socket, server: server, maximumMTU: maximumMTU,
-            maximumConnections: maximumConnections, maximumConnectionsPerIP: maximumConnectionsPerIP,
+            socket: socket, server: server, maximumMTU: maximumMTU, quota: quota,
             useCookies: useCookies, offlinePacketLimits: offlinePacketLimits, onlinePacketsPerSecond: onlinePacketsPerSecond
         )
     }
@@ -165,8 +152,7 @@ struct TransportDriver {
         let server: OfflineServer
         let advertisement: TransportAdvertisement
         let access: ListenerAccess
-        let maximumConnections: Int
-        let maximumConnectionsPerIP: Int?
+        let quota: ConnectionQuota
         let useCookies: Bool
         let offlinePacketLimits: RakNetListener.OfflinePacketLimits?
         let onlinePacketsPerSecond: UInt32?
@@ -220,7 +206,7 @@ struct TransportDriver {
     private let accepted: TransportInbox<RakNetConnection>
     private let commands: TransportCommands
     private var peers: [RakNetEndpoint: Peer] = [:]
-    private var connectionsByHost: [ListenerHost: Int] = [:]
+    private var quota: ConnectionQuota?
     private var generation: UInt64 = 0
     private var handshake: OfflineServerHandshake?
     private var offlineRate: OfflinePacketRate?
@@ -237,6 +223,7 @@ struct TransportDriver {
             dial = DialAttempt(address: address, mtu: mtu, timeout: timeout, protocolVersion: protocolVersion)
         } else if case let .listen(listener) = role {
             handshake = OfflineServerHandshake(server: listener.server, useCookies: listener.useCookies)
+            quota = listener.quota
             offlineRate = listener.offlinePacketLimits.map { OfflinePacketRate(limits: $0) }
         }
     }
@@ -392,11 +379,7 @@ struct TransportDriver {
     ) throws -> Peer {
         let address = connection.peer
         guard peers[address] == nil else { throw RakNetTransportError.connectionAlreadyExists }
-        let host = ListenerHost(address)
-        guard peers.count < listener.maximumConnections,
-              listener.maximumConnectionsPerIP.map({ connectionsByHost[host, default: 0] < $0 }) ?? true else {
-            throw RakNetTransportError.connectionLimitReached
-        }
+        try quota?.reserve(address)
 
         let key = TransportPeerKey(address: address, generation: generation)
         generation &+= 1 // reused udp endpoints
@@ -406,7 +389,6 @@ struct TransportDriver {
         )
         peer.metrics.update(from: connection)
         peers[address] = peer
-        if listener.maximumConnectionsPerIP != nil { connectionsByHost[host, default: 0] += 1 }
         return peer
     }
 
@@ -497,10 +479,7 @@ struct TransportDriver {
     private mutating func remove(_ address: RakNetEndpoint, failure: (any Error)? = nil) {
         guard let peer = peers.removeValue(forKey: address) else { return }
         peer.messages.finish(failure)
-        let host = ListenerHost(address)
-        if let count = connectionsByHost[host] {
-            connectionsByHost[host] = count > 1 ? count - 1 : nil
-        }
+        quota?.release(address)
     }
 
     private func send(_ packets: [[UInt8]], to address: RakNetEndpoint) throws {

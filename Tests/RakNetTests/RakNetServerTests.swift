@@ -63,3 +63,26 @@ private func simulateClient(
     }
     throw OnlineConnection.ConnectionError.invalidState
 }
+
+@Test func socketIndependentServerLimitsTrafficByIP() throws {
+    let endpoint = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 19132))
+    let first = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50001))
+    let second = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50002))
+    let other = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000002, port: 50001))
+    let offline = try OfflineServer(guid: 42, advertisement: [])
+    var server = try RakNetServer(on: endpoint, server: offline, offlinePacketLimits: .init(perIP: 1, total: 2))
+    var client = OfflineClient(server: endpoint)
+    let probe = try client.probe()
+    let accepted = server.receive(probe, from: first, at: 0)
+    let limited = server.receive(probe, from: second, at: 1)
+    let otherAccepted = server.receive(probe, from: other, at: 2)
+    #expect(accepted.datagrams.count == 1)
+    #expect(limited.datagrams.isEmpty)
+    #expect(otherAccepted.datagrams.count == 1)
+
+    server.block(first, for: 200, at: 1_000)
+    let blocked = server.receive(probe, from: second, at: 1_100)
+    let resumed = server.receive(probe, from: second, at: 1_201)
+    #expect(blocked.datagrams.isEmpty)
+    #expect(resumed.datagrams.count == 1)
+}

@@ -20,28 +20,60 @@ public struct RakNetServer: Sendable {
         var connection: OnlineConnection
         var lastPacket: UInt64
         var nextPing: UInt64
+        var onlineRate: OnlinePacketRate?
     }
 
     public let localAddress: RakNetEndpoint
-    private let maximumConnections: Int
+    private let onlinePacketsPerSecond: UInt32?
+    private var quota: ConnectionQuota
+    private var offlineRate: OfflinePacketRate?
+    private var temporaryBlocks: [ListenerHost: UInt64] = [:]
     private var handshake: OfflineServerHandshake
     private var peers: [RakNetEndpoint: Peer] = [:]
 
     public init(
-        on address: RakNetEndpoint, server: OfflineServer, maximumConnections: Int = 128, useCookies: Bool = true
+        on address: RakNetEndpoint, server: OfflineServer, maximumConnections: Int = 128,
+        maximumConnectionsPerIP: Int? = nil, useCookies: Bool = true,
+        offlinePacketLimits: RakNetOfflinePacketLimits? = .init(), onlinePacketsPerSecond: UInt32? = 10_000
     ) throws {
-        guard (1...4096).contains(maximumConnections) else { throw RakNetTransportError.invalidConnectionLimit }
         localAddress = address
-        self.maximumConnections = maximumConnections
+        quota = try ConnectionQuota(maximum: maximumConnections, perIP: maximumConnectionsPerIP)
+        offlineRate = offlinePacketLimits.map { OfflinePacketRate(limits: $0) }
+        self.onlinePacketsPerSecond = onlinePacketsPerSecond
         handshake = OfflineServerHandshake(server: server, useCookies: useCookies)
     }
 
+    public mutating func block(_ address: RakNetEndpoint, for milliseconds: UInt64 = 10_000, at time: UInt64) {
+        guard milliseconds > 0 else { return }
+        let host = ListenerHost(address)
+        let deadline = time + min(milliseconds, UInt64.max - time)
+        temporaryBlocks[host] = max(temporaryBlocks[host, default: deadline], deadline)
+    }
+
+    public mutating func unblock(_ address: RakNetEndpoint) {
+        temporaryBlocks.removeValue(forKey: ListenerHost(address))
+    }
+
+    private mutating func isBlocked(_ address: RakNetEndpoint, at time: UInt64) -> Bool {
+        guard !temporaryBlocks.isEmpty else { return false }
+        let host = ListenerHost(address)
+        guard let deadline = temporaryBlocks[host] else { return false }
+        if time < deadline { return true }
+        temporaryBlocks.removeValue(forKey: host)
+        return false
+    }
+
     public mutating func receive(_ datagram: [UInt8], from address: RakNetEndpoint, at time: UInt64) -> Output {
-        guard let header = datagram.first else { return Output() }
+        guard let header = datagram.first, !isBlocked(address, at: time) else { return Output() }
         if header & 0x80 == 0 {
+            guard offlineRate?.allow(address, at: time) != false else { return Output() }
             return receiveOffline(datagram, from: address, at: time)
         }
         guard var peer = peers.removeValue(forKey: address) else { return Output() }
+        guard peer.onlineRate?.allow(at: time) != false else {
+            peers[address] = peer
+            return Output()
+        }
 
         do {
             let input = try peer.connection.receive(datagram, from: address, at: time)
@@ -50,22 +82,26 @@ public struct RakNetServer: Sendable {
             if input.opened { output.events.append(.connected(address, mtu: peer.mtu)) }
             output.events += input.payloads.map { .payload(address, $0) }
             if input.closed {
+                quota.release(address)
                 output.events.append(.disconnected(address))
             } else {
                 peers[address] = peer
             }
             return output
         } catch {
+            quota.release(address)
             return Output(events: [.disconnected(address)])
         }
     }
 
     public mutating func update(at time: UInt64) -> Output {
+        if !temporaryBlocks.isEmpty { temporaryBlocks = temporaryBlocks.filter { time < $0.value } }
         var output = Output()
         for address in Array(peers.keys) {
             guard var peer = peers.removeValue(forKey: address) else { continue }
             let timeout: UInt64 = peer.connection.isOpen ? 15_000 : 5_000
             if time >= peer.lastPacket, time - peer.lastPacket >= timeout {
+                quota.release(address)
                 output.events.append(.disconnected(address))
                 continue
             }
@@ -78,6 +114,7 @@ public struct RakNetServer: Sendable {
                 }
                 peers[address] = peer
             } catch {
+                quota.release(address)
                 output.events.append(.disconnected(address))
             }
         }
@@ -118,10 +155,7 @@ public struct RakNetServer: Sendable {
         guard snapshot.localAddress == localAddress else { throw RakNetTransportError.snapshotAddressMismatch }
         let address = snapshot.remoteAddress
         guard peers[address] == nil else { throw RakNetTransportError.connectionAlreadyExists }
-        guard peers.count < maximumConnections else { throw RakNetTransportError.connectionLimitReached }
-        peers[address] = Peer(
-            mtu: snapshot.mtu, connection: snapshot.restore(at: time), lastPacket: time, nextPing: time + min(2_000, UInt64.max - time)
-        )
+        try install(snapshot.restore(at: time), mtu: snapshot.mtu, at: time)
         return Output(events: [.connected(address, mtu: snapshot.mtu)] + snapshot.bufferedPayloads.map {
             .payload(address, $0)
         })
@@ -130,13 +164,24 @@ public struct RakNetServer: Sendable {
     private mutating func receiveOffline(_ datagram: [UInt8], from address: RakNetEndpoint, at time: UInt64) -> Output {
         guard let response = handshake.receive(datagram, from: address, at: time) else { return Output() }
         if let negotiation = response.negotiation, peers[address] == nil {
-            guard peers.count < maximumConnections,
-                  let connection = try? OnlineConnection(
+            guard let connection = try? OnlineConnection(
                       accepting: address, negotiation: negotiation, batchAcknowledgements: true, congestionControl: true
                   ) else { return Output() }
-            peers[address] = Peer(mtu: negotiation.mtu, connection: connection, lastPacket: time, nextPing: time + min(2_000, UInt64.max - time))
+            do {
+                try install(connection, mtu: negotiation.mtu, at: time)
+            } catch {
+                return Output()
+            }
         }
         return Output(datagrams: [Datagram(destination: address, bytes: response.datagram)])
+    }
+
+    private mutating func install(_ connection: OnlineConnection, mtu: UInt16, at time: UInt64) throws {
+        try quota.reserve(connection.peer)
+        peers[connection.peer] = Peer(
+            mtu: mtu, connection: connection, lastPacket: time, nextPing: time + min(2_000, UInt64.max - time),
+            onlineRate: onlinePacketsPerSecond.map { OnlinePacketRate(packetsPerSecond: $0, at: time) }
+        )
     }
 
     private static func datagrams(_ packets: [[UInt8]], to destination: RakNetEndpoint) -> [Datagram] {
