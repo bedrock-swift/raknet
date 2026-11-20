@@ -22,7 +22,7 @@ struct OfflineCookies: Sendable {
         }
         guard pending.count < maximumPending else { return nil }
         let value = UInt32.random(in: 1...UInt32.max)
-        pending[sender] = Challenge(value: value, expiresAt: now + lifetime)
+        pending[sender] = Challenge(value: value, expiresAt: now + min(lifetime, UInt64.max - now))
         return value
     }
 

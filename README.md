@@ -63,7 +63,7 @@ Use `RakNetEndpoint.ipv6(IPv6Endpoint(addressHigh: 0, addressLow: 1, port: 19132
 
 Both sides use RakNet protocol 11 by default. Set `supportedProtocols` on the listener or `protocolVersion` on the dialer to configure the handshake.
 
-The default MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OfflineClient`, `OfflineServerHandshake`, and `OnlineConnection` expose the protocol state machines for applications that provide their own UDP I/O. Call `update(at:)` periodically to send pending acknowledgements, retries, and queued payloads.
+The default MTU is 1440 bytes. Use `maximumMTU` on the listener or `mtu` on the dialer to set a different value. `OfflineClient`, `OfflineServerHandshake`, and `OnlineConnection` expose the protocol state machines for applications that provide their own UDP I/O. Use `RakNetServer` to manage multiple peers on the same transport. Call `update(at:)` periodically to send pending acknowledgements, retries, and queued payloads.
 
 Use `try await connection.snapshot()` to capture session state for custom I/O. Use `snapshot.encoded()` and `RakNetSessionSnapshot(data:)` to persist it. It includes unread payloads and the monotonic time in milliseconds at capture. Call `snapshot.restore(at:)` to resume on a different monotonic clock. Use `connection.detach()` and `listener.adopt(snapshot)` to hand off a live server session on the same local address. Use `RakNetConnection.resume(snapshot)` to reopen a detached client.
 

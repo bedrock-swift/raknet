@@ -56,7 +56,7 @@ public struct RakNetSessionSnapshot: Sendable {
         guard data.count <= Self.archiveSizeLimit else { throw ArchiveError.sizeLimit }
         let archive = try PropertyListDecoder().decode(Archive.self, from: data)
         guard archive.version == Self.archiveVersion else { throw ArchiveError.unsupportedVersion(archive.version) }
-        guard archive.localAddress.port != 0, archive.remoteAddress.port != 0, !archive.remoteAddress.isUnspecified,
+        guard archive.remoteAddress.port != 0, !archive.remoteAddress.isUnspecified,
               archive.localAddress.udpOverhead == archive.remoteAddress.udpOverhead,
               archive.bufferedPayloads.count <= 64,
               archive.bufferedPayloads.allSatisfy({ !$0.isEmpty && $0.count <= 512 * 1024 }),
