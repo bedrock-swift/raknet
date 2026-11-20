@@ -1,3 +1,5 @@
+import Dispatch
+
 public struct IPv4Endpoint: Hashable, Sendable {
     public let address: UInt32
     public let port: UInt16
@@ -37,6 +39,29 @@ public struct IPv6Endpoint: Hashable, Sendable {
 public enum RakNetEndpoint: Hashable, Sendable {
     case ipv4(IPv4Endpoint)
     case ipv6(IPv6Endpoint)
+
+    public enum ResolutionError: Error, Equatable {
+        case invalidHost
+        case lookupFailed(Int32)
+        case noAddresses
+    }
+
+    public static func resolve(_ host: String, port: UInt16) async throws -> [RakNetEndpoint] {
+        try Task.checkCancellation()
+        guard !host.isEmpty, !host.utf8.contains(0) else { throw ResolutionError.invalidHost }
+        let result = TransportInbox<[RakNetEndpoint]>(limit: 1, byteLimit: 1)
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = result.offer(try UDPSocket.resolve(host, port: port))
+                result.finish()
+            } catch {
+                result.finish(error)
+            }
+        }
+        guard let addresses = try await result.next() else { throw ResolutionError.noAddresses }
+        try Task.checkCancellation()
+        return addresses
+    }
 
     public var port: UInt16 {
         switch self {

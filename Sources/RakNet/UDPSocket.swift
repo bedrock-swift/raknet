@@ -173,30 +173,68 @@ package final class UDPSocket: Sendable {
         }
     }
 
+    static func resolve(_ host: String, port: UInt16) throws -> [RakNetEndpoint] {
+        #if os(Windows)
+        var data = WSADATA()
+        let startup = WSAStartup(0x0202, &data)
+        guard startup == 0 else { throw RakNetEndpoint.ResolutionError.lookupFailed(startup) }
+        defer { _ = WSACleanup() }
+        #endif
+
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        #if os(Linux)
+        hints.ai_socktype = Int32(SOCK_DGRAM.rawValue)
+        #else
+        hints.ai_socktype = SOCK_DGRAM
+        #endif
+        var list: UnsafeMutablePointer<addrinfo>?
+        let error = getaddrinfo(host, String(port), &hints, &list)
+        guard error == 0 else { throw RakNetEndpoint.ResolutionError.lookupFailed(error) }
+        guard let list else { throw RakNetEndpoint.ResolutionError.noAddresses }
+        defer { freeaddrinfo(list) }
+
+        var results: [RakNetEndpoint] = []
+        var unique: Set<RakNetEndpoint> = []
+        var next: UnsafeMutablePointer<addrinfo>? = list
+        while let entry = next?.pointee {
+            if let address = entry.ai_addr, entry.ai_addrlen <= MemoryLayout<sockaddr_storage>.size,
+               let endpoint = endpoint(for: UnsafePointer(address), length: AddressLength(entry.ai_addrlen)),
+               unique.insert(endpoint).inserted {
+                results.append(endpoint)
+            }
+            next = entry.ai_next
+        }
+        guard !results.isEmpty else { throw RakNetEndpoint.ResolutionError.noAddresses }
+        return results
+    }
+
     private static func endpoint(for storage: inout sockaddr_storage, length: AddressLength) -> RakNetEndpoint? {
-        switch Int32(storage.ss_family) {
+        withUnsafePointer(to: &storage) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { endpoint(for: $0, length: length) }
+        }
+    }
+
+    private static func endpoint(for address: UnsafePointer<sockaddr>, length: AddressLength) -> RakNetEndpoint? {
+        switch Int32(address.pointee.sa_family) {
         case AF_INET where length >= MemoryLayout<sockaddr_in>.size:
-            return withUnsafePointer(to: &storage) {
-                $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
-                    let address = $0.pointee
-                    return .ipv4(IPv4Endpoint(
-                        address: UInt32(bigEndian: address.sin_addr.networkAddress),
-                        port: UInt16(bigEndian: address.sin_port)
-                    ))
-                }
+            return address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                let address = $0.pointee
+                return .ipv4(IPv4Endpoint(
+                    address: UInt32(bigEndian: address.sin_addr.networkAddress),
+                    port: UInt16(bigEndian: address.sin_port)
+                ))
             }
         case AF_INET6 where length >= MemoryLayout<sockaddr_in6>.size:
-            return withUnsafePointer(to: &storage) {
-                $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
-                    let address = $0.pointee
-                    return withUnsafeBytes(of: address.sin6_addr) { bytes in
-                        .ipv6(IPv6Endpoint(
-                            addressHigh: UInt64(wireBytes: bytes.prefix(8)),
-                            addressLow: UInt64(wireBytes: bytes.dropFirst(8).prefix(8)),
-                            port: UInt16(bigEndian: address.sin6_port),
-                            scopeID: address.sin6_scope_id
-                        ))
-                    }
+            return address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+                let address = $0.pointee
+                return withUnsafeBytes(of: address.sin6_addr) { bytes in
+                    .ipv6(IPv6Endpoint(
+                        addressHigh: UInt64(wireBytes: bytes.prefix(8)),
+                        addressLow: UInt64(wireBytes: bytes.dropFirst(8).prefix(8)),
+                        port: UInt16(bigEndian: address.sin6_port),
+                        scopeID: address.sin6_scope_id
+                    ))
                 }
             }
         default:
