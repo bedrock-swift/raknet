@@ -60,6 +60,7 @@ private func simulateClient(
             if output.events.contains(.connected(address, mtu: negotiation.mtu)) {
                 let stale = server.receive(request, from: address, at: now)
                 #expect(stale.datagrams.isEmpty)
+                #expect(stale.events.isEmpty)
                 return client
             }
             toClient += output.datagrams
@@ -177,8 +178,11 @@ private func simulateClient(
     let address = RakNetEndpoint.ipv4(IPv4Endpoint(address: 0x7f000001, port: 50001))
     let offline = try OfflineServer(guid: 42, advertisement: [])
     var server = try RakNetServer(on: endpoint, server: offline, maximumConnections: 1)
-    let first = try simulateClient(address, connectingTo: endpoint, server: &server, at: 0)
+    var first = try simulateClient(address, connectingTo: endpoint, server: &server, at: 0)
     #expect(first.isOpen)
+    let originalPayload = [UInt8(0xfe), 41]
+    let originalPacket = try #require(try first.send(originalPayload, at: 10).first)
+    #expect(server.receive(originalPacket, from: address, at: 11).events == [.payload(address, originalPayload)])
 
     var second = try simulateClient(address, connectingTo: endpoint, server: &server, at: 100, replacing: true)
     let packets = try second.send([0xfe, 42], at: 200)
