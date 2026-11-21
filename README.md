@@ -8,6 +8,8 @@ A RakNet transport library for Minecraft: Bedrock Edition, written in Swift.
 [![RakNet transport](https://img.shields.io/badge/transport-RakNet-black?style=flat-square)](https://github.com/facebookarchive/RakNet)
 [![MIT license](https://img.shields.io/github/license/bedrock-swift/raknet?style=flat-square)](LICENSE)
 
+<a href="https://dsc.gg/bedrock-swift"><img src="https://raw.githubusercontent.com/bedrock-swift/waygate/discord-card/discord.svg" width="320" alt="Bedrock Swift on Discord"></a>
+
 </div>
 
 ## Getting started
