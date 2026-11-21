@@ -14,3 +14,4 @@ Keep each pull request focused on one change. Explain what it changes and how yo
 - Add focused coverage for changes to the wire format or session behavior.
 - Use the [echo demo](../README.md#development) to check changes to UDP transport.
 - Follow the surrounding Swift style. Keep source comments short, lowercase, and beside the relevant code.
+- Use short, lowercase commit subjects.
